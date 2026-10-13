@@ -1,0 +1,94 @@
+# Codexion test cases
+#
+# Format:   expect | arguments | description
+#
+#   invalid  rejected: no simulation output, no crash, no hang
+#   survive  no burnout, every coder compiles at least the required number of times
+#   burnout  a burnout is printed on time, and nothing is printed after it
+#   any      burnout or completion, with all observable log rules checked
+#   policy   boundary input may be rejected with a diagnostic or simulated correctly
+#
+# The expected outcomes are reasoned from the subject's rules (see GUIDE.md,
+# section 10). They are not official. Work them out on paper yourself, and add
+# your own cases.
+
+# ---- invalid input --------------------------------------------------------
+# "Reject invalid inputs such as negative numbers, non-integers, or a
+#  scheduler other than fifo or edf."
+invalid | 5 800 200 200 200 5 0                 | 7 arguments (scheduler missing)
+invalid | 5 800 200 200 200 5 0 fifo extra      | 9 arguments
+invalid | 0 800 200 200 200 5 0 fifo            | zero coders
+invalid | -5 800 200 200 200 5 0 fifo           | negative number of coders
+invalid | 5 -800 200 200 200 5 0 fifo           | negative time_to_burnout
+invalid | 5 800 200 200 200 5 -1 fifo           | negative cooldown
+invalid | abc 800 200 200 200 5 0 fifo          | not a number
+invalid | 5 800 12x 200 200 5 0 fifo            | trailing garbage after a number
+invalid | 5 800 2.5 200 200 5 0 fifo            | not an integer
+invalid | 5 800 200 200 200 5 0 FIFO            | scheduler must be exactly "fifo" or "edf"
+invalid | 5 800 200 200 200 5 0 rr              | unknown scheduler
+invalid | 5 800 200 200 200 5 0 edff            | scheduler with extra characters
+
+# ---- must burn out --------------------------------------------------------
+burnout | 1 800 200 200 200 5 0 fifo            | one coder, one dongle: can never compile
+burnout | 1 800 200 200 200 5 0 edf             | one coder, edf
+burnout | 3 400 300 100 100 5 0 fifo            | 3 coders all share dongles: the third waits until 600 > 400
+burnout | 5 200 300 100 100 5 0 edf             | compiling (300) takes longer than time_to_burnout (200)
+burnout | 4 310 200 100 100 10 0 edf            | a full cycle (400) is longer than time_to_burnout (310)
+burnout | 2 800 200 100 100 5 500 fifo          | long cooldown: second compile of the first coder comes too late
+
+# ---- survival expectations ---------------------------------------------------------
+survive | 2 800 200 200 200 5 0 fifo            | two coders share both dongles
+survive | 2 800 200 200 200 5 0 edf             | two coders, edf
+survive | 4 800 200 200 200 5 0 fifo            | even number of coders
+survive | 4 800 200 200 200 5 0 edf             | even number of coders, edf
+survive | 5 800 200 200 200 5 0 fifo            | odd number of coders
+survive | 5 800 200 200 200 5 0 edf             | odd number of coders, edf
+survive | 5 800 200 200 200 1 0 fifo            | one compile each
+survive | 2 1000 200 100 100 5 100 fifo         | cooldown, still feasible
+survive | 4 800 200 200 200 5 50 edf            | cooldown with 4 coders
+any | 4 410 200 100 100 10 0 edf            | [stress] tight feasible timeline; outcome depends on acquisition and OS scheduling
+survive | 100 800 200 200 200 3 0 edf           | [stress] many coders
+survive | 200 1000 200 200 200 3 0 fifo         | [stress] many coders, fifo
+
+# ---- additional argument validation ---------------------------------------
+invalid | | no arguments
+invalid | 2 | only one argument
+invalid | 2 1000 -10 10 10 2 0 fifo | negative compile time
+invalid | 2 1000 10 -10 10 2 0 fifo | negative debug time
+invalid | 2 1000 10 10 -10 2 0 fifo | negative refactor time
+invalid | 2 1000 10 10 10 -1 0 fifo | negative required count
+invalid | 2 1000 10 10 10 2 0 EDF | uppercase EDF
+invalid | 2 1000 10 10 10 2 0 fifoX | trailing scheduler garbage
+invalid | 2 1000 10ms 10 10 2 0 edf | units in numeric argument
+invalid | 2 1000 10 1e2 10 2 0 fifo | scientific notation
+invalid | 2 1000 10 10 --1 2 0 fifo | repeated sign
+
+# ---- generous timing baselines -------------------------------------------
+survive | 3 2000 20 10 10 3 0 fifo | three coders, generous deadline
+survive | 3 2000 20 10 10 3 0 edf | three coders, EDF baseline
+survive | 7 3000 20 10 10 3 0 fifo | odd ring with seven coders
+survive | 7 3000 20 10 10 3 0 edf | odd ring with EDF
+survive | 6 3000 20 10 10 3 30 fifo | cooldown dominates compile duration
+survive | 6 3000 20 10 10 3 30 edf | cooldown dominates compile duration, EDF
+policy | 2 2000 10 0 0 10 0 fifo | immediate re-request, FIFO contention
+policy | 2 2000 10 0 0 10 0 edf | immediate re-request, EDF contention
+policy | 4 2000 0 10 10 3 0 fifo | zero compile time
+policy | 4 2000 10 0 10 3 0 edf | zero debug time
+policy | 4 2000 10 10 0 3 0 fifo | zero refactor time
+policy | 2 2000 0 0 0 5 0 edf | all phase durations zero
+survive | 2 3000 20 10 10 1 100 fifo | one completed compile each with cooldown
+
+# ---- burnout in different phases and waiting conditions -------------------
+burnout | 1 50 10 10 10 2 100 edf | quick single-coder shutdown
+burnout | 2 50 100 1 1 3 0 fifo | deadline expires while compiling
+burnout | 2 100 10 200 1 3 0 edf | deadline expires while debugging
+burnout | 2 100 10 1 200 3 0 fifo | deadline expires while refactoring
+burnout | 2 100 10 1 1 3 200 edf | deadline expires during cooldown wait
+
+# ---- boundary experiments: accept either valid terminal outcome ------------
+policy | 2 100 50 0 0 5 0 fifo | [stress] exact scheduling boundary
+policy | 3 150 50 0 0 5 0 edf | [stress] odd ring without timing margin
+policy | 4 0 10 10 10 2 0 fifo | [stress] zero burnout time
+
+# Zero required compiles: either explicit rejection or immediate success is accepted.
+policy | 2 1000 20 10 10 0 0 fifo | zero required compiles, documented policy
