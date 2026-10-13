@@ -1,0 +1,15 @@
+# Local reference documents
+/README.md
+/en.subject.pdf
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# C build outputs
+*.o
+*.d
+/coders/codexion
+
+# Desktop metadata
+.DS_Store
