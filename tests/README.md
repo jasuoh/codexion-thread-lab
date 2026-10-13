@@ -33,6 +33,12 @@ Baseline cases start selected; cases marked `[stress]` start deselected. Search 
 
 Execution prints one result per case, reasons for failures, warnings, and a summary. Each batch or repeat keeps its own directory under `tests/logs/run-*`; earlier logs are preserved. `.case` records the arguments and expectation, `.out` is stdout, `.err` is stderr, `.check`/`.check.err` record the checker output, and `.vg` is the optional Valgrind report. Ctrl-C interrupts execution.
 
+To delete saved runs and Python caches, run `make clean` from the repository
+root after tests finish. Use `make -n clean` to preview the command. Cleanup
+only removes `tests/logs/` and `tests/__pycache__/`; custom `CODEXION_LOGDIR`
+locations are managed separately. Run `make test` for the self-tests without
+creating Python bytecode caches.
+
 ## Cases and expectations
 
 `cases.txt` uses `expect | arguments | description`. Arguments are whitespace-separated tokens, not shell commands: quotes and shell expansions are not interpreted. Empty arguments are supported for testing no arguments.
