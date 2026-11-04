@@ -2,6 +2,7 @@
 """Regression checks for the checker, using synthetic logs and fake binaries."""
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -62,6 +63,20 @@ class CheckerTests(unittest.TestCase):
         log = '0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n20 1 is debugging\n'
         log += '20 2 has taken a dongle\n20 2 has taken a dongle\n20 2 is compiling\n'
         self.assertIn('not visible', self.check_log(log, True, expect='survive'))
+
+    def completion_log(self, restart):
+        log = '0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n20 1 is debugging\n'
+        log += '20 2 has taken a dongle\n20 2 has taken a dongle\n20 2 is compiling\n30 1 is refactoring\n'
+        log += f'40 2 is debugging\n{restart} 1 has taken a dongle\n{restart} 1 has taken a dongle\n'
+        return log + f'{restart} 1 is compiling\n'
+
+    def test_compile_after_completion_warns(self):
+        output = self.check_log(self.completion_log(300), True, expect='survive')
+        self.assertIn('should have stopped', output)
+
+    def test_compile_within_completion_tolerance(self):
+        output = self.check_log(self.completion_log(45), True, expect='survive')
+        self.assertNotIn('should have stopped', output)
 
     def test_format_and_ids(self):
         for log in ['hello\n', '0 3 has taken a dongle\n', '']:
@@ -167,6 +182,27 @@ class RunnerTests(unittest.TestCase):
                                'policy | 2 100 20 10 10 0 0 fifo | zero count')
         self.assertEqual(result.returncode, 1, result.stdout)
 
+    def test_zero_count_output_before_stop_is_warning(self):
+        result = self.run_case('echo "0 1 has taken a dongle"; echo "0 1 has taken a dongle"; echo "0 1 is compiling"',
+                               'policy | 2 1000 20 10 10 0 0 fifo | zero count')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('WARN: zero required compiles still produced', result.stdout)
+
+    def test_busy_cpu_is_warning(self):
+        spin = ('exec python3 -c "import time\ne = time.time() + 0.8\nwhile time.time() < e: pass\n'
+                'print(\\"800 1 burned out\\")"')
+        case = 'burnout | 1 800 20 10 10 1 0 fifo | spins'
+        result = self.run_case(spin, case, settings={'TIME_LIMIT': '4', 'CPU_WARN': '50'})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('busy-waiting', result.stdout)
+        result = self.run_case(spin, case, settings={'TIME_LIMIT': '4', 'CPU_WARN': '0'})
+        self.assertNotIn('busy-waiting', result.stdout)
+
+    def test_idle_run_has_no_cpu_warning(self):
+        result = self.run_case('sleep 0.6; echo "600 1 burned out"', 'burnout | 1 600 20 10 10 1 0 fifo | sleeps')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('busy-waiting', result.stdout)
+
     def test_valgrind_crash_is_failure(self):
         result = self.run_case('echo error >&2; exit 1', 'invalid | | invalid',
                                options=['--leaks'], helpers={'valgrind': 'exit 139'})
@@ -181,10 +217,51 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('passed: 2', result.stdout)
 
 
+class FunctionCheckTests(unittest.TestCase):
+    def scan(self, source):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'main.c').write_text(source)
+            return subprocess.run(['python3', str(HERE / 'check_functions.py'), folder],
+                                  capture_output=True, text=True)
+
+    def test_allowed_source(self):
+        result = self.scan('#include <stdio.h>\nstatic int\thelper(int x)\n{\n\treturn ((int)(x));\n}\n\n'
+                           'int\tmain(void)\n{\n\tprintf("%d\\n", helper(1)); /* sleep(1) */\n'
+                           '\treturn (0);\n}\n')
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_forbidden_source(self):
+        for call in ['pthread_detach(t)', 'pthread_cond_signal(&c)', 'clock_gettime(0, &ts)',
+                     'pthread_mutex_trylock(&m)', 'nanosleep(&ts, 0)']:
+            with self.subTest(call=call):
+                result = self.scan(f'int\tmain(void)\n{{\n\t{call};\n\treturn (0);\n}}\n')
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(call.split('(')[0], result.stdout)
+
+    def test_global_variable(self):
+        result = self.scan('int\tg_count = 0;\n\nint\tmain(void)\n{\n\treturn (g_count);\n}\n')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('global variable', result.stdout)
+
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('nm'), 'needs cc and nm')
+    def test_binary_imports(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, binary = Path(folder) / 'a.c', Path(folder) / 'a.out'
+            source.write_text('#include <stdlib.h>\n#include <time.h>\nint main(void)\n{\n'
+                              '\tstruct timespec ts;\n\tvoid *p = malloc(1);\n\tfree(p);\n'
+                              '\treturn clock_gettime(CLOCK_MONOTONIC, &ts);\n}\n')
+            subprocess.run(['cc', str(source), '-o', str(binary)], check=True)
+            result = subprocess.run(['python3', str(HERE / 'check_functions.py'), str(binary)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn('clock_gettime', result.stdout)
+            self.assertNotIn('malloc', result.stdout)
+
+
 class MenuTests(unittest.TestCase):
     def test_all_case_definitions(self):
         cases = menu.load_cases(HERE / 'cases.txt')
-        self.assertEqual(len(cases), 63)
+        self.assertEqual(len(cases), 68)
         self.assertTrue(any(case[0] == 'policy' for case in cases))
 
     def test_bad_case_definition(self):

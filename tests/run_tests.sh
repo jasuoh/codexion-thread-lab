@@ -10,6 +10,7 @@ LOGDIR="${CODEXION_LOGDIR:-$DIR/logs}"
 SLACK="${SLACK:-2}"
 PHASE_TOL="${PHASE_TOL:-10}"
 TIME_LIMIT="${TIME_LIMIT:-20}"
+CPU_WARN="${CPU_WARN:-100}"
 LEAKS=0
 FILTER=""
 INCLUDE_STRESS=0
@@ -34,6 +35,7 @@ Environment:
   TIME_LIMIT=s       positive integer timeout in seconds (default: 20)
   SLACK=ms           extra deadline tolerance, nonnegative integer (default: 2)
   PHASE_TOL=ms       phase overrun warning threshold (default: 10)
+  CPU_WARN=percent   warn when CPU time exceeds this share of wall time (default: 100, 0 disables)
 
 Logs are preserved in a separate run-* directory for every batch.
 EOF
@@ -54,7 +56,7 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-for setting in TIME_LIMIT SLACK PHASE_TOL; do
+for setting in TIME_LIMIT SLACK PHASE_TOL CPU_WARN; do
 	value="${!setting}"
 	if [[ ! "$value" =~ ^(0|[1-9][0-9]{0,5})$ ]]; then
 		echo "$setting must be an integer between 0 and 999999." >&2
@@ -140,6 +142,26 @@ fail=0
 warned=0
 idx=0
 
+# Static check of the linked binary: functions and globals the subject forbids.
+if command -v nm >/dev/null 2>&1; then
+	fn_report="$(python3 "$DIR/check_functions.py" "$BIN" 2>&1)"
+	fn_rc=$?
+	printf '%s\n' "$fn_report" > "$LOGDIR/functions.check"
+	if [ "$fn_rc" -eq 1 ]; then
+		fail=$((fail + 1))
+		printf '%s[FAIL]%s allowed functions and globals (subject rules)\n' "$RED" "$RESET"
+		printf '%s\n' "$fn_report" | grep '^FAIL' | head -n 8 | sed 's/^/         /'
+	elif [ "$fn_rc" -ne 0 ]; then
+		printf '%s[WARN]%s function check could not run (see %s)\n' "$YELLOW" "$RESET" "$LOGDIR/functions.check"
+	else
+		printf '%s[ OK ]%s allowed functions and globals (subject rules)\n' "$GREEN" "$RESET"
+	fi
+	if printf '%s\n' "$fn_report" | grep -q '^WARN'; then
+		warned=$((warned + 1))
+		printf '%s\n' "$fn_report" | grep '^WARN' | head -n 3 | sed 's/^/         /'
+	fi
+fi
+
 while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	expect="$(printf '%s' "$expect" | tr -d '[:space:]')"
 	case "$expect" in ''|\#*) continue ;; esac
@@ -158,7 +180,9 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	reasons=""
 	notes=""
 	printf '%s | %s | %s\n' "$expect" "$args" "$desc" > "$base.case"
-	run_limited "$TIME_LIMIT" "$BIN" "${argv[@]}" >"$out" 2>"$err"
+	# The time keyword reports CPU used by waited-for descendants, including
+	# the binary started by timeout.
+	{ TIMEFORMAT='%R %U %S'; time run_limited "$TIME_LIMIT" "$BIN" "${argv[@]}" >"$out" 2>"$err"; } 2>"$base.time"
 	rc=$?
 	status="$(describe_status "$rc" "$TIME_LIMIT")"
 	[ -z "$status" ] || reasons="FAIL: $status"
@@ -178,9 +202,12 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		else
 			reasons+=$'\n'"FAIL: boundary input produced neither a valid simulation nor a clear rejection"
 		fi
-	elif [ "$expect" = policy ] && [ "${argv[5]}" -eq 0 ]; then
-		reasons+=$'\n'"FAIL: zero required compiles produced simulation output instead of stopping immediately"
+	elif [ "$expect" = policy ] && [ "${argv[5]}" -eq 0 ] && grep -Eq '^[0-9]+ [0-9]+ burned out$' "$out" "$err"; then
+		reasons+=$'\n'"FAIL: zero required compiles ended in a burnout instead of stopping immediately"
 	else
+		if [ "$expect" = policy ] && [ "${argv[5]}" -eq 0 ]; then
+			notes+=$'\n'"WARN: zero required compiles still produced simulation output before stopping"
+		fi
 		[ "$rc" -eq 0 ] || notes+=$'\n'"WARN: simulation exited with status $rc (exit codes are not specified by the subject)"
 		check_expect="$expect"
 		[ "$expect" != policy ] || check_expect=any
@@ -195,6 +222,14 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		fi
 		reasons+=$'\n'"$(printf '%s\n' "$result" | grep '^FAIL' || true)"
 		notes+=$'\n'"$(printf '%s\n' "$result" | grep '^WARN' || true)"
+	fi
+
+	if [ "$CPU_WARN" -gt 0 ] && [ -z "$status" ]; then
+		cpu_note="$(tr ',' '.' < "$base.time" | awk -v limit="$CPU_WARN" '
+			NF == 3 && $1 >= 0.5 && $2 + $3 > $1 * limit / 100 {
+				printf "WARN: used %.2fs CPU in %.2fs wall time (%d%%): busy-waiting?", $2 + $3, $1, 100 * ($2 + $3) / $1
+			}')"
+		[ -z "$cpu_note" ] || notes+=$'\n'"$cpu_note"
 	fi
 
 	if [ "$LEAKS" -eq 1 ] && [ -z "$status" ] && { [ "$expect" = invalid ] || [ "${argv[0]}" -le 20 ]; }; then
