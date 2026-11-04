@@ -22,6 +22,7 @@
 #   - nobody starts compiling after their deadline without a burnout
 #   - a burnout is not premature and is printed within 10 ms of the deadline
 #   - nothing is printed after "burned out"
+#   - no compile starts long after every coder completed req compiles (WARN)
 #   - survive: no burnout and every coder started at least req compiles
 #     (final completion may not be visible in the log)
 #
@@ -54,6 +55,8 @@ BEGIN {
 		mark[i] = 0
 		count[i] = 0
 	}
+	reached = 0
+	done_t = -1
 	fails = 0
 	warns = 0
 	burned = 0
@@ -109,6 +112,11 @@ function check_dongle(t, x, k) {
 function on_compile(t, x,    gap) {
 	if (state[x] != "taking" || takes[x] != 2)
 		fail(ctx "started compiling without two \"has taken a dongle\" lines first")
+	if (done_t >= 0 && !late_warned && t > done_t + ttc + ptol) {
+		late_warned = 1
+		warn(ctx "compile started after every coder had completed " req \
+			" compiles (by about " (done_t + ttc) " ms): the simulation should have stopped")
+	}
 	gap = t - last[x]
 	if (gap > ttb + slack)
 		fail(ctx "started compiling " gap " ms after its previous compile start (time_to_burnout = " ttb "): it should have burned out")
@@ -121,6 +129,8 @@ function on_compile(t, x,    gap) {
 	comp[x] = t
 	last[x] = t
 	count[x]++
+	if (req > 0 && count[x] == req && ++reached == n)
+		done_t = t
 }
 
 function on_debug(t, x,    d) {

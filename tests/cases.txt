@@ -77,6 +77,9 @@ policy | 4 2000 10 0 10 3 0 edf | zero debug time
 policy | 4 2000 10 10 0 3 0 fifo | zero refactor time
 policy | 2 2000 0 0 0 5 0 edf | all phase durations zero
 survive | 2 3000 20 10 10 1 100 fifo | one completed compile each with cooldown
+survive | 3 1000 100 50 50 3 100 edf | odd ring where cooldown serializes every compile
+survive | 4 600 150 100 100 20 0 edf | twenty cycles: accumulated timing drift must not cause a burnout
+burnout | 50 400 300 100 100 5 0 edf | burnout precision with fifty coder threads
 
 # ---- burnout in different phases and waiting conditions -------------------
 burnout | 1 50 10 10 10 2 100 edf | quick single-coder shutdown
@@ -90,5 +93,10 @@ policy | 2 100 50 0 0 5 0 fifo | [stress] exact scheduling boundary
 policy | 3 150 50 0 0 5 0 edf | [stress] odd ring without timing margin
 policy | 4 0 10 10 10 2 0 fifo | [stress] zero burnout time
 
-# Zero required compiles: either explicit rejection or immediate success is accepted.
+# Values beyond 32-bit int: reject them, or simulate without overflow.
+policy | 2 2147483648 20 10 10 2 0 fifo | time_to_burnout just above INT_MAX
+policy | 2 4294967296 20 10 10 2 0 edf | time_to_burnout that wraps to 0 in 32 bits
+
+# Zero required compiles: explicit rejection or immediate success is accepted.
+# Output from a run that stops at once is a warning; a burnout is a failure.
 policy | 2 1000 20 10 10 0 0 fifo | zero required compiles, documented policy
