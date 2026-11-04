@@ -2,6 +2,7 @@
 """Regression checks for the checker, using synthetic logs and fake binaries."""
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -214,6 +215,47 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('passed: 1', result.stdout)
         result = self.run_case('echo error >&2; exit 1', cases, options=['--stress'])
         self.assertIn('passed: 2', result.stdout)
+
+
+class FunctionCheckTests(unittest.TestCase):
+    def scan(self, source):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'main.c').write_text(source)
+            return subprocess.run(['python3', str(HERE / 'check_functions.py'), folder],
+                                  capture_output=True, text=True)
+
+    def test_allowed_source(self):
+        result = self.scan('#include <stdio.h>\nstatic int\thelper(int x)\n{\n\treturn ((int)(x));\n}\n\n'
+                           'int\tmain(void)\n{\n\tprintf("%d\\n", helper(1)); /* sleep(1) */\n'
+                           '\treturn (0);\n}\n')
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_forbidden_source(self):
+        for call in ['pthread_detach(t)', 'pthread_cond_signal(&c)', 'clock_gettime(0, &ts)',
+                     'pthread_mutex_trylock(&m)', 'nanosleep(&ts, 0)']:
+            with self.subTest(call=call):
+                result = self.scan(f'int\tmain(void)\n{{\n\t{call};\n\treturn (0);\n}}\n')
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(call.split('(')[0], result.stdout)
+
+    def test_global_variable(self):
+        result = self.scan('int\tg_count = 0;\n\nint\tmain(void)\n{\n\treturn (g_count);\n}\n')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('global variable', result.stdout)
+
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('nm'), 'needs cc and nm')
+    def test_binary_imports(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, binary = Path(folder) / 'a.c', Path(folder) / 'a.out'
+            source.write_text('#include <stdlib.h>\n#include <time.h>\nint main(void)\n{\n'
+                              '\tstruct timespec ts;\n\tvoid *p = malloc(1);\n\tfree(p);\n'
+                              '\treturn clock_gettime(CLOCK_MONOTONIC, &ts);\n}\n')
+            subprocess.run(['cc', str(source), '-o', str(binary)], check=True)
+            result = subprocess.run(['python3', str(HERE / 'check_functions.py'), str(binary)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn('clock_gettime', result.stdout)
+            self.assertNotIn('malloc', result.stdout)
 
 
 class MenuTests(unittest.TestCase):

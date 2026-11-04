@@ -142,6 +142,26 @@ fail=0
 warned=0
 idx=0
 
+# Static check of the linked binary: functions and globals the subject forbids.
+if command -v nm >/dev/null 2>&1; then
+	fn_report="$(python3 "$DIR/check_functions.py" "$BIN" 2>&1)"
+	fn_rc=$?
+	printf '%s\n' "$fn_report" > "$LOGDIR/functions.check"
+	if [ "$fn_rc" -eq 1 ]; then
+		fail=$((fail + 1))
+		printf '%s[FAIL]%s allowed functions and globals (subject rules)\n' "$RED" "$RESET"
+		printf '%s\n' "$fn_report" | grep '^FAIL' | head -n 8 | sed 's/^/         /'
+	elif [ "$fn_rc" -ne 0 ]; then
+		printf '%s[WARN]%s function check could not run (see %s)\n' "$YELLOW" "$RESET" "$LOGDIR/functions.check"
+	else
+		printf '%s[ OK ]%s allowed functions and globals (subject rules)\n' "$GREEN" "$RESET"
+	fi
+	if printf '%s\n' "$fn_report" | grep -q '^WARN'; then
+		warned=$((warned + 1))
+		printf '%s\n' "$fn_report" | grep '^WARN' | head -n 3 | sed 's/^/         /'
+	fi
+fi
+
 while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	expect="$(printf '%s' "$expect" | tr -d '[:space:]')"
 	case "$expect" in ''|\#*) continue ;; esac

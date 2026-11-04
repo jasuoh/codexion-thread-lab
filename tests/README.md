@@ -11,6 +11,8 @@ tests/run_tests.sh invalid            # text filter, also works with fifo/edf
 tests/run_tests.sh --batch -l         # memory checks for small cases
 CODEXION=./my_build tests/run_tests.sh # select another executable
 python3 tests/self_test.py            # test the checker without Codexion
+python3 tests/check_functions.py coders/codexion  # forbidden functions in a binary
+python3 tests/check_functions.py path/to/repo     # heuristic source scan, no build
 ```
 
 Without arguments, redirected output uses batch mode. Unless `CODEXION` is set, the runner builds with `make -C coders` when that Makefile exists. This checkout does not include a Codexion implementation: supply your binary before running simulation tests.
@@ -52,6 +54,12 @@ creating Python bytecode caches.
 | `policy` | A boundary input may be rejected with a diagnostic and nonzero status, or produce a valid simulation. Zero required compiles may also exit successfully without output; log lines printed before an immediate stop produce a warning, a burnout fails. Inspect the warning against the implementation's documented policy. |
 
 The 68 cases cover malformed input, negative values, single-coder shutdown, even and odd rings, both schedulers, cooldowns, zero-duration phases, repeated contention, burnout during different phases, scale, and tight boundaries. They are reasoned examples, not official evaluation cases. Generous baseline timings reduce timing sensitivity; they are still expectations to investigate, not proofs for every acquisition protocol. Tight feasible schedules are experiments because the acquisition policy and OS scheduling affect the outcome. Zero-duration phase and zero-required-count probes use `policy` because the subject does not precisely specify their validation. Ordinary baseline cases assume a zero dongle cooldown is supported. The suite does not impose an `INT_MAX` input limit: validate the range supported by your implementation without arithmetic overflow. Two `policy` probes pass values just above 32-bit `int` range; silent wraparound typically shows up as a premature burnout.
+
+## Allowed functions and globals
+
+Before the cases run, the runner inspects the binary with `nm` and fails when it imports a function outside the subject's allowed list (for example `pthread_detach`, `pthread_cond_signal`, `pthread_mutex_trylock`, `clock_gettime`, `nanosleep`, `calloc`, `strtol`, `fflush`) or defines a global variable. The report is saved as `functions.check` in the run directory. Some symbols are emitted by the compiler for allowed calls (`printf` can become `puts` or `__printf_chk`, `atoi` can become `strtol`); these are warnings, so check the source.
+
+Given a directory, `check_functions.py` scans `.c`/`.h` sources instead, limited to `coders/` when present. That mode is a heuristic: it treats every called name that the project does not define as external, so macros or unusual formatting can produce false reports.
 
 ## What the checker can establish
 

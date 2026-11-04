@@ -12,7 +12,8 @@ is not included.
 - [Learning guide](GUIDE.md): explanations, examples, and design considerations.
 - [PDF guide](GUIDE.pdf): a downloadable version for offline reading.
 - [Test lab](tests/README.md): an interactive terminal selector, 68 test cases,
-  a log checker, and optional Valgrind checks.
+  a log checker, a forbidden-function and global-variable check, busy-waiting
+  detection, and optional Valgrind checks.
 - Self-tests for the test tools, using synthetic traces and controlled fixtures.
 
 ## Getting started
