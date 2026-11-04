@@ -103,7 +103,7 @@ class CheckerTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
-    def run_case(self, body, case, options=(), settings=None, helpers=None):
+    def run_case(self, body, case, options=(), settings=None, helpers=None, inspect=None):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
             binary = folder / 'fake'
@@ -120,8 +120,11 @@ class RunnerTests(unittest.TestCase):
                 helper.chmod(0o755)
             if helpers:
                 env['PATH'] = str(folder) + os.pathsep + env['PATH']
-            return subprocess.run([str(HERE / 'run_tests.sh'), '--batch', *options],
-                                  env=env, text=True, capture_output=True, timeout=8)
+            result = subprocess.run([str(HERE / 'run_tests.sh'), '--batch', *options],
+                                    env=env, text=True, capture_output=True, timeout=12)
+            if inspect:
+                inspect(folder / 'logs')
+            return result
 
     def test_final_row_without_newline(self):
         result = self.run_case('echo error >&2; exit 1', 'invalid | | no args')
@@ -203,6 +206,51 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn('busy-waiting', result.stdout)
 
+    def test_log_directory_is_traceable(self):
+        def inspect(logs):
+            runs = sorted(logs.glob('run-*'))
+            self.assertEqual(len(runs), 1)
+            self.assertRegex(runs[0].name, r'^run-\d{8}-\d{6}-\w{4}$')
+            self.assertEqual((logs / 'latest').resolve(), runs[0].resolve())
+            info = (runs[0] / 'run.info').read_text()
+            for field in ('started:', 'binary:', 'sha256:', 'settings:', 'machine:'):
+                self.assertIn(field, info)
+            names = sorted(p.name for p in runs[0].glob('*.case'))
+            self.assertEqual(names, ['r01-01-invalid.case', 'r02-01-invalid.case'])
+            self.assertIn('result: OK', (runs[0] / 'r02-01-invalid.case').read_text())
+            summary = (runs[0] / 'summary.txt').read_text()
+            self.assertIn('repetition 2/2', summary)
+            self.assertIn('passed: 2', summary)
+        result = self.run_case('echo error >&2; exit 1', 'invalid | | no args',
+                               options=['--repeat', '2'], inspect=inspect)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_bad_repeat_rejected(self):
+        for value in ('0', '101', 'x'):
+            with self.subTest(value=value):
+                result = self.run_case('exit 1', 'invalid | | no args', options=['--repeat', value])
+                self.assertEqual(result.returncode, 2)
+
+    def test_late_burnout_output_warns(self):
+        body = 'sleep 0.3; echo "100 1 burned out"'
+        result = self.run_case(body, 'burnout | 1 100 20 10 10 1 0 fifo | late print')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('reached the terminal', result.stdout)
+        result = self.run_case(body, 'burnout | 1 100 20 10 10 1 0 fifo | late print',
+                               settings={'LATENCY_WARN': '0'})
+        self.assertNotIn('reached the terminal', result.stdout)
+
+    def test_output_runs_on_a_terminal(self):
+        result = self.run_case('[ -t 1 ] && echo "100 1 burned out"',
+                               'burnout | 1 100 20 10 10 1 0 fifo | tty')
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_race_report_is_failure(self):
+        result = self.run_case('echo "100 1 burned out"', 'burnout | 1 100 20 10 10 1 0 fifo | race',
+                               options=['--races'], helpers={'valgrind': 'exit 43'})
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('reported data races', result.stdout)
+
     def test_valgrind_crash_is_failure(self):
         result = self.run_case('echo error >&2; exit 1', 'invalid | | invalid',
                                options=['--leaks'], helpers={'valgrind': 'exit 139'})
@@ -256,6 +304,54 @@ class FunctionCheckTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn('clock_gettime', result.stdout)
             self.assertNotIn('malloc', result.stdout)
+
+
+class BuildCheckTests(unittest.TestCase):
+    GOOD = ('NAME = codexion\nCFLAGS = -Wall -Wextra -Werror -pthread\nOBJS = main.o\n\n'
+            'all: $(NAME)\n\n$(NAME): $(OBJS)\n\tcc $(CFLAGS) $(OBJS) -o $(NAME)\n\n'
+            '%.o: %.c\n\tcc $(CFLAGS) -c $< -o $@\n\nclean:\n\trm -f $(OBJS)\n\n'
+            'fclean: clean\n\trm -f $(NAME)\n\nre: fclean all\n\n.PHONY: all clean fclean re\n')
+
+    def check(self, makefile):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'Makefile').write_text(makefile)
+            (Path(folder) / 'main.c').write_text('int\tmain(void)\n{\n\treturn (0);\n}\n')
+            return subprocess.run([str(HERE / 'check_build.sh'), folder], capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('make'), 'needs cc and make')
+    def test_good_makefile(self):
+        result = self.check(self.GOOD)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('make'), 'needs cc and make')
+    def test_relink_and_missing_flags(self):
+        result = self.check('all:\n\tcc -Wall main.c -o codexion\nclean:\nfclean:\n\trm -f codexion\n'
+                            're: fclean all\n')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        for message in ('-Wextra', '-Werror', 'relinks'):
+            self.assertIn(message, result.stdout)
+
+
+class LatencyTests(unittest.TestCase):
+    def analyze(self, lines):
+        with tempfile.TemporaryDirectory() as folder:
+            log, arrivals = Path(folder) / 'out', Path(folder) / 'arrivals'
+            log.write_text(''.join(line + '\n' for line, _ in lines))
+            arrivals.write_text(''.join(f'{at}\n' for _, at in lines))
+            return subprocess.run(['python3', str(HERE / 'stamp.py'), '--analyze', str(log),
+                                   str(arrivals), '10'], capture_output=True, text=True).stdout
+
+    def test_prompt_output(self):
+        output = self.analyze([('0 1 has taken a dongle', 2.0), ('800 1 burned out', 803.0)])
+        self.assertNotIn('WARN', output)
+
+    def test_buffered_output(self):
+        output = self.analyze([('0 1 has taken a dongle', 801.0), ('800 1 burned out', 801.5)])
+        self.assertIn('buffered', output)
+
+    def test_late_burnout(self):
+        output = self.analyze([('0 1 has taken a dongle', 1.0), ('800 1 burned out', 830.0)])
+        self.assertIn('burnout line reached the terminal', output)
 
 
 class MenuTests(unittest.TestCase):
