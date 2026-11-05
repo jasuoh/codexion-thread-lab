@@ -12,8 +12,9 @@ is not included.
 - [Learning guide](GUIDE.md): explanations, examples, and design considerations.
 - [PDF guide](GUIDE.pdf): a downloadable version for offline reading.
 - [Test lab](tests/README.md): an interactive terminal selector, 68 test cases,
-  a log checker, a forbidden-function and global-variable check, busy-waiting
-  detection, and optional Valgrind checks.
+  a log checker, forbidden-function, Makefile and Norm checks, busy-waiting
+  and output-latency detection, optional Valgrind memory and race checks, and
+  timestamped, traceable logs.
 - Self-tests for the test tools, using synthetic traces and controlled fixtures.
 
 ## Getting started
@@ -36,24 +37,33 @@ Check the test tools without a Codexion binary:
 make test
 ```
 
-To test your implementation, point the runner at your executable:
+To test your implementation, point the lab at your executable and, for the
+Makefile and Norm check, at its project directory:
 
 ```bash
-CODEXION=/path/to/codexion tests/run_tests.sh --tui
-CODEXION=/path/to/codexion tests/run_tests.sh --batch
-CODEXION=/path/to/codexion tests/run_tests.sh --batch --stress
-CODEXION=/path/to/codexion tests/run_tests.sh --batch --leaks
+make check  CODEXION=/path/to/coders/codexion CODEXION_SRC=/path/to/coders
+make stress CODEXION=/path/to/coders/codexion
+make leaks  CODEXION=/path/to/coders/codexion
+make races  CODEXION=/path/to/coders/codexion
+make repeat CODEXION=/path/to/coders/codexion REPEAT=20
+make tui    CODEXION=/path/to/coders/codexion
 ```
 
-Without `CODEXION`, the runner looks for `coders/codexion` and runs
-`make -C coders` if a Makefile exists there. In the menu, use arrow keys to
-navigate, Space to toggle cases, Enter to run, and `q` to quit.
-See the [test lab documentation](tests/README.md) for filters, settings, and
-how to interpret results.
+`make` alone lists every target. The same runs are available directly, for
+example `CODEXION=/path/to/codexion tests/run_tests.sh --batch --races`.
+Without `CODEXION`, the runner looks for `coders/codexion`, runs
+`make -C coders` if a Makefile exists there, and checks that Makefile.
+In the menu, use arrow keys to navigate, Space to toggle cases, Enter to run,
+and `q` to quit. See the [test lab documentation](tests/README.md) for filters,
+settings, and how to interpret results.
 
 ## Results and cleanup
 
-Each batch saves its results in a separate directory under `tests/logs/`.
+Each batch saves its results in a directory named after its start time, such
+as `tests/logs/run-20261104-191341-FDSx`; `tests/logs/latest` points to the
+newest. `run.info` records the binary's checksum and git commit, the settings
+and the machine load, so a failure can be traced back to the exact build.
+`make logs` lists all runs and `make latest` shows the newest summary.
 Review failures and warnings there before cleaning up:
 
 ```bash

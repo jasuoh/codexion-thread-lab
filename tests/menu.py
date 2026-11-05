@@ -120,6 +120,7 @@ def main():
     parser.add_argument('--filter', default='')
     parser.add_argument('--stress', action='store_true')
     parser.add_argument('--leaks', action='store_true')
+    parser.add_argument('--races', action='store_true')
     options = parser.parse_args()
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print('The menu needs a terminal; use run_tests.sh --batch.', file=sys.stderr)
@@ -143,6 +144,8 @@ def main():
         command = [str(HERE / 'run_tests.sh'), '--batch', '--stress']
         if leaks:
             command.append('--leaks')
+        if options.races:
+            command.append('--races')
         try:
             for iteration in range(1, repeats + 1):
                 print(f'\nRun {iteration}/{repeats} — {len(indexes)} selected cases', flush=True)

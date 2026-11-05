@@ -9,13 +9,19 @@ tests/run_tests.sh --batch            # baseline cases, no interaction
 tests/run_tests.sh --batch --stress   # include timing and scale experiments
 tests/run_tests.sh invalid            # text filter, also works with fifo/edf
 tests/run_tests.sh --batch -l         # memory checks for small cases
+tests/run_tests.sh --batch -r         # data-race checks (Valgrind DRD) for small cases
+tests/run_tests.sh --batch --repeat 20 edf  # repeat the selection 20 times
 CODEXION=./my_build tests/run_tests.sh # select another executable
+CODEXION_SRC=../project/coders CODEXION=../project/coders/codexion tests/run_tests.sh --batch
+tests/check_build.sh ../project/coders # only the Makefile/Norm check
 python3 tests/self_test.py            # test the checker without Codexion
 python3 tests/check_functions.py coders/codexion  # forbidden functions in a binary
 python3 tests/check_functions.py path/to/repo     # heuristic source scan, no build
 ```
 
-Without arguments, redirected output uses batch mode. Unless `CODEXION` is set, the runner builds with `make -C coders` when that Makefile exists. This checkout does not include a Codexion implementation: supply your binary before running simulation tests.
+The repository root has a Makefile with the same entry points: `make check`, `make stress`, `make leaks`, `make races`, `make repeat REPEAT=20`, `make full`, `make logs` and `make latest`; pass `CODEXION=…` and `CODEXION_SRC=…` on the command line.
+
+Without arguments, redirected output uses batch mode. Unless `CODEXION` is set, the runner builds with `make -C coders` when that Makefile exists, and checks that project's Makefile. This checkout does not include a Codexion implementation: supply your binary before running simulation tests.
 
 ## Menu controls
 
@@ -33,7 +39,25 @@ Without arguments, redirected output uses batch mode. Unless `CODEXION` is set, 
 
 Baseline cases start selected; cases marked `[stress]` start deselected. Search `stress` to select those experiments. Search `invalid`, `burnout`, `survive`, `fifo` or `edf` to work on a particular group. Clear all selections before selecting only a filtered group if that is what you want to run.
 
-Execution prints one result per case, reasons for failures, warnings, and a summary. Each batch or repeat keeps its own directory under `tests/logs/run-*`; earlier logs are preserved. `.case` records the arguments and expectation, `.out` is stdout, `.err` is stderr, `.check`/`.check.err` record the checker output, `.time` holds wall, user and system seconds, and `.vg` is the optional Valgrind report. Ctrl-C interrupts execution.
+Execution prints one result per case, reasons for failures, warnings, and a summary. Ctrl-C interrupts execution.
+
+## Logs
+
+Each batch gets its own directory, named after its start time: `tests/logs/run-20261104-191341-FDSx`. `tests/logs/latest` points to the newest one, and earlier runs are preserved. Every run directory contains:
+
+| File | Contents |
+|---|---|
+| `run.info` | Start time, command line, binary path, modification time and SHA-256, git commit of the binary's and tester's checkouts (with an uncommitted-changes marker), settings, kernel, CPU count and load |
+| `summary.txt` | The printed results without colors, plus the finish time |
+| `functions.check`, `build.check` | Allowed-function and Makefile/Norm reports |
+| `NN-expect.case` | Case definition, start time, exact command, result and its reasons |
+| `NN-expect.out` / `.err` | stdout and stderr of the simulation |
+| `NN-expect.check` / `.check.err` | Log checker output |
+| `NN-expect.arrivals` / `.latency` | Arrival time of every stdout line and the latency analysis |
+| `NN-expect.time` | Wall, user and system seconds |
+| `NN-expect.vg` / `.race` | Optional memcheck and race-detector reports |
+
+With `--repeat`, names get a repetition prefix (`r03-12-survive.out`). To trace a failure, compare `run.info` (which build, which machine load) with the case's `.case` and `.out` files; `make logs` lists every run with its result line.
 
 To delete saved runs and Python caches, run `make clean` from the repository
 root after tests finish. Use `make -n clean` to preview the command. Cleanup
@@ -61,6 +85,14 @@ Before the cases run, the runner inspects the binary with `nm` and fails when it
 
 Given a directory, `check_functions.py` scans `.c`/`.h` sources instead, limited to `coders/` when present. That mode is a heuristic: it treats every called name that the project does not define as external, so macros or unusual formatting can produce false reports.
 
+## Makefile and Norm
+
+When the project directory is known (`CODEXION_SRC`, or `coders/` when `CODEXION` is not set), `check_build.sh` copies it to a temporary directory and checks: the `all`, `clean`, `fclean` and `re` rules, `NAME = codexion`, `-Wall -Wextra -Werror` and `-pthread` in the compiler commands, that a second `make` neither recompiles nor relinks, that `clean` removes object files and `fclean` the executable, and that `re` rebuilds. If `norminette` is installed, it must pass on every `.c` and `.h` file. The project's own directory is never modified. Use `--no-build-check` to skip it.
+
+## Data races
+
+`--races` runs each non-invalid simulation with at most `RACE_MAX_CODERS` coders (default 8) under Valgrind DRD; any reported conflict fails the case and is saved as `.race`. DRD only sees interleavings that actually occur under its serialized scheduling, so a clean report is evidence, not proof, and very short unprotected windows can be missed. `RACE_TOOL=helgrind` is available, but recent glibc versions make Helgrind report "dubious" condition-variable broadcasts from inside `pthread_cond_timedwait` even in correct programs. Compiling with `-g` gives source lines in the reports.
+
 ## What the checker can establish
 
 - Log format, coder IDs, nondecreasing timestamps and per-coder action order.
@@ -77,6 +109,8 @@ Final compile completion can be invisible when shutdown suppresses subsequent lo
 
 The runner also measures the CPU time of each simulation. Runs of at least 0.5 s that use more CPU time than `CPU_WARN` percent of the wall time (by default, more than one fully busy core on average) produce a busy-waiting warning. Raise the threshold or set `CPU_WARN=0` if many threads or zero-duration phases legitimately keep the CPU busy.
 
+The simulation runs with stdout on a pseudo-terminal, as in an interactive shell, and the arrival time of every line is recorded. When the burnout line reaches the terminal more than `LATENCY_WARN` ms (default 10) after its printed timestamp, or any output arrives more than 100 ms late (full buffering, or a print mutex held while sleeping), the case gets a warning. The comparison assumes the simulation clock starts close to process start; the estimated startup delay is subtracted, at most 20 ms.
+
 Request arrival times are also absent, so FIFO/EDF arbitration cannot be verified from these logs. Use instrumented traces and design review for scheduling, and Helgrind/DRD/ThreadSanitizer for races. Memory checks are separate Valgrind executions; their timing and survival outcomes are not graded because instrumentation changes timing. Leaks, memory errors, crashes, or failure to finish the memory check fail the case. Increase `TIME_LIMIT` if instrumentation needs more time.
 
 ## Timing and runner settings
@@ -90,6 +124,11 @@ Request arrival times are also absent, so FIFO/EDF arbitration cannot be verifie
 | `SLACK` | 2 ms | Additional deadline tolerance |
 | `PHASE_TOL` | 10 ms | Phase overrun warning threshold |
 | `CPU_WARN` | 100 % | Busy-waiting warning threshold, CPU time as a share of wall time; 0 disables |
+| `LATENCY_WARN` | 10 ms | Burnout output latency warning threshold; 0 disables |
+| `REPEAT` | 1 | Repetitions, 1 to 100 (same as `--repeat`) |
+| `RACE_TOOL` | `drd` | Race detector for `--races`: `drd` or `helgrind` |
+| `RACE_MAX_CODERS` | 8 | Largest coder count run under the race detector; race runs allow ten times `TIME_LIMIT` |
+| `CODEXION_SRC` | `coders/` without `CODEXION` | Project directory for the Makefile/Norm check |
 
 The checker reads timestamps after the process exits; it cannot establish when a reader actually received buffered output. The subject's burnout reporting allowance is 10 ms; `SLACK` is an extra checker tolerance, not a subject requirement. Minimum phase and premature burnout checks allow 1 ms for timestamp rounding. Successful runs and clean detector reports provide evidence, not proof. Investigate failures with saved logs and repeat under ordinary machine load.
 
