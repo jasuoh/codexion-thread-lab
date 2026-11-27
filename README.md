@@ -11,7 +11,7 @@ is not included.
 
 - [Learning guide](GUIDE.md): explanations, examples, and design considerations.
 - [PDF guide](GUIDE.pdf): a downloadable version for offline reading.
-- [Test lab](tests/README.md): an interactive terminal selector, 76 test cases
+- [Test lab](tests/README.md): an interactive terminal selector, 96 test cases
   (including EDF liveness cases for subject v1.5), a log checker that
   explains failures (likely causes, a diagnosis of unexpected burnouts, and a
   reproduce command),

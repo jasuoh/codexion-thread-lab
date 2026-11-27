@@ -539,7 +539,7 @@ class LatencyTests(unittest.TestCase):
 class MenuTests(unittest.TestCase):
     def test_all_case_definitions(self):
         cases = menu.load_cases(HERE / 'cases.txt')
-        self.assertEqual(len(cases), 76)
+        self.assertEqual(len(cases), 96)
         self.assertTrue(any(case[0] == 'policy' for case in cases))
 
     def test_bad_case_definition(self):
