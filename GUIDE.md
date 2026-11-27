@@ -1,10 +1,13 @@
 # Codexion — A Beginner's Guide to Threads, Locks and Scheduling
 
-> A learning guide for 42 students starting **Codexion** (subject v1.1).
+> A learning guide for 42 students starting **Codexion** (subject v1.5).
 > It explains the concepts so you can design and write **your own** implementation.
 > It is **not** a solution: you won't find a coder routine, a monitor routine or a project heap here.
 >
-> **Source of truth:** [the subject PDF, v1.1](en.subject.pdf). Requirements below come from that document; design suggestions, interpretations, and test assumptions are labeled separately.
+> **Source of truth:** your copy of the subject PDF, v1.5 (it is not distributed in this repository). Requirements below come from that document; design suggestions, interpretations, and test assumptions are labeled separately.
+>
+> **What changed since v1.1:** `pthread_cond_signal` and `clock_gettime` are now allowed (§3, §4); a deterministic EDF tie-breaker is required (§6); the liveness rule under EDF is stated as a guarantee your program must give (§6); the Makefile goes at the repository root, with sources in a folder of your choice (§1).
+>
 > Use this guide alongside the subject, man pages, small experiments, and peer discussion. Examples illustrate possible designs; they are not a required implementation plan.
 > Claims marked **⚠️ verify in man page** are ones you should check yourself (`man 3 <function>`, or `man 3p <function>` for the POSIX version).
 >
@@ -74,11 +77,14 @@ If you have done Philosophers, much of this will be familiar:
 | fork is free right after release | **dongle has a cooldown** after release |
 | monitor design is up to you | **a separate monitor thread is required** |
 | — | **you must implement a priority queue (heap)** |
-| — | condition variables are allowed (`pthread_cond_*`) |
+| — | condition variables are allowed (`pthread_cond_*`, including `signal`) |
+| — | **EDF needs a deterministic tie-breaker** for equal deadlines |
 
 Other points from the subject worth knowing early:
 - Global variables are forbidden.
-- Submit the Makefile and C source/header files in `coders/`; the program is named `codexion`.
+- Submit the Makefile **at the root** of your repository, and the `.c`/`.h` files in a folder of your choice; the program is named `codexion`.
+- With **one coder there is one dongle**: *"If there is only one coder, there should be only one dongle on the table."* That coder can never hold two dongles, so it cannot compile and must burn out.
+- After refactoring, a coder *"will immediately attempt to acquire dongles and start compiling again"*: there is no extra thinking phase.
 - Use C and follow the 42 Norm. The small examples here explain concepts; check their integration and formatting against the Norm yourself.
 - No libft.
 - Compile with `cc` and include `-Wall -Wextra -Werror -pthread`. Provide `$(NAME)`, `all`, `clean`, `fclean`, and `re` Makefile rules, without unnecessary relinking.
@@ -302,15 +308,16 @@ Compile and link with `-pthread`. Include `<pthread.h>`.
 pthread_create, pthread_join,
 pthread_mutex_init, pthread_mutex_lock, pthread_mutex_unlock, pthread_mutex_destroy,
 pthread_cond_init, pthread_cond_wait, pthread_cond_timedwait,
-pthread_cond_broadcast, pthread_cond_destroy,
-gettimeofday, usleep, write, malloc, free, printf, fprintf, strcmp, strlen, atoi, memset
+pthread_cond_signal, pthread_cond_broadcast, pthread_cond_destroy,
+gettimeofday, clock_gettime,
+usleep, write, malloc, free, printf, fprintf, strcmp, strlen, atoi, memset
 ```
 
-> **Not allowed:** `pthread_detach` and `pthread_cond_signal`, so this guide doesn't document them. As a result:
-> - **Every thread you create must be joined.**
-> - **Explicit condition-variable notifications use `pthread_cond_broadcast`; timed waits can also expire.**
+> **New in v1.5:** `pthread_cond_signal` and `clock_gettime` are on the list. See §3.3 for when `signal` is safe with a priority queue, and §4 for which clock to use.
 >
-> Other functions you may know are not allowed either: `clock_gettime`, `nanosleep`, `pthread_mutex_trylock`, `pthread_condattr_setclock` and semaphores.
+> **Not allowed:** `pthread_detach`, so this guide doesn't document it. As a result, **every thread you create must be joined.**
+>
+> Other functions you may know are not allowed either: `nanosleep`, `pthread_mutex_trylock`, `pthread_barrier_*`, `pthread_condattr_setclock`, `pthread_exit`, `pthread_cancel` and semaphores. `pthread_condattr_setclock` matters most: without it, `pthread_cond_timedwait` always measures `abstime` on `CLOCK_REALTIME`.
 
 ---
 
@@ -548,7 +555,7 @@ Waking up does **not** mean your condition is true. There are three reasons:
 
 The `while` loop handles all three: if the condition still isn't true, the thread goes back to sleep.
 
-#### `pthread_cond_broadcast` (and why not `signal`)
+#### `pthread_cond_broadcast` and `pthread_cond_signal`
 
 ```c
 int pthread_cond_broadcast(pthread_cond_t *cond);
@@ -561,11 +568,16 @@ int pthread_cond_broadcast(pthread_cond_t *cond);
   - When the queue head changes.
   - When the simulation stops, so every waiter wakes up, sees the stop flag and exits.
 
-**Signal vs. broadcast:** In general pthreads, `pthread_cond_signal` wakes *at least one* waiter, and `pthread_cond_broadcast` wakes *all* of them.
-- `signal` can reduce unnecessary wakeups when any selected waiter can make progress. More specialized protocols can use separate condition variables for different waiters.
-- With a priority queue, the thread you need to wake is a *specific* one (the queue head), and `signal` might wake the wrong one.
+```c
+int pthread_cond_signal(pthread_cond_t *cond);
+```
 
-`signal` isn't allowed in Codexion anyway, so use `broadcast`. Waking everyone can cause unnecessary contention (the "thundering herd"). The predicate loop prevents a woken thread from proceeding incorrectly, provided state access and notification are synchronized correctly; broadcasting alone does not establish correctness. With one condition variable per dongle and only its two neighbours waiting on it, the number of unnecessary wakeups per broadcast is limited.
+**Signal vs. broadcast:** `pthread_cond_signal` unblocks *at least one* waiter (allowed since subject v1.5), and `pthread_cond_broadcast` unblocks *all* of them. Both return `0` or an error number, and both do nothing if no one is waiting.
+- `signal` can reduce unnecessary wakeups when **any** waiter that wakes can make progress.
+- With a priority queue, the thread that must proceed is a *specific* one (the queue head). `signal` picks a waiter you don't control: it may wake a coder who is not at the head, who re-checks the predicate and goes back to sleep. The head then keeps sleeping although its turn has come. That is a **lost wakeup**, and with no timeout it can starve the head until it burns out.
+- `signal` becomes safe when each condition variable has only waiters that can all proceed, for example **one condition variable per coder** (signal exactly the coder you granted), or a shared one where any waiter can take the resource.
+
+With a shared condition variable and a priority queue, `broadcast` is the simple, correct default. Waking everyone can cause unnecessary contention (the "thundering herd"). The predicate loop prevents a woken thread from proceeding incorrectly, provided state access and notification are synchronized correctly; broadcasting alone does not establish correctness. With one condition variable per dongle and only its two neighbours waiting on it, the number of unnecessary wakeups per broadcast is limited. If you use `signal`, write down in your README why the thread it wakes is always one that can proceed.
 
 > **Tip:** Broadcast **while holding** the mutex. POSIX also allows broadcasting without it, but holding it is simpler to reason about. Helgrind also flags broadcasting without the lock as "dubious".
 
@@ -578,7 +590,7 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 
 - **What it does:** Like `wait`, with a timeout at `abstime`. Timeout does not guarantee that the function returns at that exact instant: it must reacquire the mutex and get CPU time.
   - `abstime` is an **absolute** point in time, not a duration.
-  - It is measured on the condition variable's clock, which is `CLOCK_REALTIME` by default. You can't change that here, because `pthread_condattr_setclock` isn't allowed. Conveniently, `gettimeofday` measures the same real-time clock.
+  - It is measured on the condition variable's clock, which is `CLOCK_REALTIME` by default. You can't change that here, because `pthread_condattr_setclock` isn't allowed. Build `abstime` from the same clock: `gettimeofday` (microseconds) or `clock_gettime(CLOCK_REALTIME, …)` (nanoseconds, allowed since v1.5). A `CLOCK_MONOTONIC` timestamp is the wrong base here: it counts from boot, so the wait would expire immediately.
 - **Returns:** `0` when woken, or `ETIMEDOUT` when `abstime` has passed. Either way it **re-locks the mutex** before returning. It returns `EINVAL` if `tv_nsec` is outside `[0, 999999999]`. ⚠️ verify in man page
 - **In Codexion:**
   - **Cooldown:** a waiting coder knows exactly when a dongle becomes usable (`release_time + dongle_cooldown`). It can sleep until then instead of polling.
@@ -663,6 +675,27 @@ long	now_ms(void)
 ```
 
 (This illustration assumes a 64-bit `long` and a successful `gettimeofday` call. Check the target platform and handle failure in your implementation. A 32-bit `long` cannot hold present-day epoch milliseconds; deadline additions and unit conversions also need overflow-safe arithmetic.)
+
+### `clock_gettime` (allowed since v1.5)
+
+```c
+#include <time.h>
+int clock_gettime(clockid_t clockid, struct timespec *tp);
+```
+
+- **What it does:** Fills `tp` with seconds (`tv_sec`) and nanoseconds (`tv_nsec`) of the chosen clock.
+- **Returns:** `0`, or `-1` with `errno` set.
+- **Clocks worth knowing:** ⚠️ verify in man page (`man 2 clock_gettime`)
+  - `CLOCK_REALTIME`: the same wall clock as `gettimeofday`. Use it to build `abstime` for `pthread_cond_timedwait`.
+  - `CLOCK_MONOTONIC`: never jumps when the system time is adjusted, so it is better for measuring elapsed time. Its zero point is arbitrary (usually boot), so it cannot be passed to `pthread_cond_timedwait` here.
+  - `CLOCK_PROCESS_CPUTIME_ID` / `CLOCK_THREAD_CPUTIME_ID`: CPU time used, not elapsed time.
+- **Pick one clock per purpose.** If log timestamps and deadlines use `CLOCK_MONOTONIC` while timed waits use `CLOCK_REALTIME`, you need a conversion, and a clock adjustment can move one but not the other. The simplest consistent design is a single real-time clock (`gettimeofday` or `CLOCK_REALTIME`) for everything.
+
+The subject mentions CPU usage time:
+
+> *"To reduce hardware impact on performance measurements, consider using CPU usage time instead of real-time clock when feasible. However, for this project, real-time measurements using gettimeofday() are acceptable and recommended for simplicity."*
+
+CPU time stops while a thread sleeps or waits, and Codexion's phases are mostly sleeping and waiting, so burnout deadlines and phase durations must stay on a wall clock. CPU time is useful as a **measurement**: if your process uses far more CPU time than wall time while coders "sleep", something is spinning (§5). The test lab reports this as a busy-waiting warning.
 
 ### Timestamps relative to the simulation start
 
@@ -810,7 +843,7 @@ When several coders want the same dongle, **the scheduler decides** who gets it.
 - **`fifo`:** *"the dongle is granted to the coder whose request arrived first."*
 - **`edf`:** Earliest Deadline First, with *"deadline = last_compile_start + time_to_burnout"*. The coder closest to burning out goes first.
 
-The subject also requires **liveness**: *"coders should not starve under edf scheduling, provided the parameters are feasible."*
+The subject also requires **liveness**: *"The program must guarantee liveness: no coder should be starved of dongles and burn out under edf scheduling, provided the parameters are feasible."* Under `fifo` a burnout with feasible parameters is not ruled out by the subject; under `edf` it is a bug in your program.
 
 ### Worked timeline (one contested dongle, simplified)
 
@@ -849,7 +882,7 @@ This example assumes each selected coder can acquire their other dongle too. It 
 
 The subject requires liveness under EDF with feasible parameters, but does not define a feasibility test. Distinguish a set of timings for which a successful schedule exists from one your particular implementation can sustain. Use hand-worked timelines and repeated tests to examine the difference; successful runs provide evidence, not a general proof.
 
-**Ties** (equal deadlines in EDF) are not specified by the subject. Pick a deterministic rule, such as earliest request first or lowest coder id, and document it.
+**Ties** (equal deadlines in EDF) need a rule. The subject says: *"The tie-breaker rule is required to ensure a fully deterministic EDF policy, even in edge cases."* It doesn't say which rule, so pick a deterministic one, such as earliest request first (a FIFO ticket) or lowest coder id, implement it in the heap comparison, and document it in your README. Equal deadlines are rare with millisecond timestamps but happen easily at the start, when every coder's deadline is `start + time_to_burnout`. Whatever you choose, the comparison must be a strict total order: two different requests never compare as equal.
 
 The subject also doesn't say exactly *when* a request "arrives". A natural choice is the protected registration of a resource request after refactoring. If requests are made separately for each dongle, distinguish the arrival of each request from the start of the whole acquisition attempt. Define this consistently, then document it.
 
@@ -1135,11 +1168,13 @@ The expected outcomes below are this guide's own reasoning; the subject doesn't 
 
 | Command | Why it's interesting | Expected |
 |---|---|---|
-| `./codexion 1 800 200 200 200 5 0 fifo` | Only one dongle exists | Can never compile, so it burns out at ~800. The program must still **exit cleanly** |
+| `./codexion 1 800 200 200 200 5 0 fifo` | Only one dongle exists | At most one `has taken a dongle`; it can never compile, so it burns out at ~800. The program must still **exit cleanly** |
 | `./codexion 2 800 200 200 200 5 0 fifo` | Smallest real contention; the two coders share the same two dongles | Runs without burnout until both have compiled 5 times |
 | `./codexion 2 800 200 100 100 5 500 fifo` | Long cooldown | Assuming coder 1 starts at 0, coder 2 can start at ~700. Coder 1 cannot restart before its deadline at ~800. Either coder may win the initial grant |
 | `./codexion 4 410 200 100 100 10 0 edf` | Tight but feasible: pairs alternate exactly | A successful timeline exists with little margin; use as an experiment, not a universal scheduler expectation |
 | `./codexion 4 310 200 100 100 10 0 edf` | Infeasible | A burnout at ~310 |
+| `./codexion 5 700 200 100 100 10 0 edf` | EDF liveness, odd ring: at most 2 coders compile at once, so each coder can restart every ~500 ms | No burnout: the subject requires liveness under EDF with feasible parameters |
+| `./codexion 3 900 200 100 100 10 0 edf` | EDF liveness with 3 coders: any two share a dongle, so only one compiles at a time (cycle ~600 ms) | No burnout |
 | `./codexion 200 800 200 200 200 5 0 edf` | Many threads | No burnout, reasonable CPU, clean exit |
 | `./codexion 5 800 200 200 200 0 0 fifo` | 0 required compiles | Not specified by the subject. Decide and document |
 | `./codexion 0 800 200 200 200 5 0 fifo` | Zero coders | Rejected as invalid input. No threads started |
@@ -1244,12 +1279,16 @@ Compile with `-g` so you get file and line numbers.
 
 **Subject requirements and the guide's stopping/logging interpretation**
 - [ ] A global variable anywhere (including `static` file-level variables)
-- [ ] A function that isn't on the allowed list (`pthread_detach`, `pthread_cond_signal`, `clock_gettime`, `strtol`…)
+- [ ] A function that isn't on the allowed list (`pthread_detach`, `pthread_mutex_trylock`, `nanosleep`, `strtol`…)
+- [ ] `pthread_cond_signal` on a condition variable shared by waiters with different priorities: the wrong coder wakes and the head sleeps on
+- [ ] No tie-breaker in the EDF comparison, so equal deadlines come out in heap order
+- [ ] Mixing `CLOCK_MONOTONIC` deadlines with a `pthread_cond_timedwait` that measures `CLOCK_REALTIME`
+- [ ] The Makefile in a subfolder instead of the repository root
 - [ ] Cooldown not applied, or applied to only one of the two dongles
 - [ ] Scheduler ignored: "whoever locks first wins" is not FIFO
 - [ ] Coder numbers starting at 0
 - [ ] Messages printed after `burned out`
-- [ ] The 1-coder case hangs instead of burning out and exiting
+- [ ] The 1-coder case hangs instead of burning out and exiting, or takes the same dongle twice
 - [ ] Leaks on the error or burnout path
 - [ ] Omitting required flags `-Wall -Wextra -Werror -pthread`, or relinking without changes
 
@@ -1269,6 +1308,8 @@ Codexion adds two more sections:
 
 5. **"Blocking cases handled":** every concurrency problem you addressed. The subject names some: deadlock prevention and Coffman's conditions, starvation prevention, cooldown handling, precise burnout detection, and log serialization.
 6. **"Thread synchronization mechanisms":** the primitives you used (`pthread_mutex_t`, `pthread_cond_t`, any custom event mechanism) and how they coordinate access to dongles, logging and monitor state. The subject wants **examples of how races are prevented** and **how coders and the monitor communicate safely**.
+
+Good places to state your design decisions: the EDF tie-breaker, when a request "arrives" for FIFO, whether you use `signal` or `broadcast` and why, which clock you use, and how you validate input. `make readme CODEXION_SRC=path/to/project` in this repository checks the required headings and topics (not the quality of the text).
 
 ### Writing an honest "AI usage" section
 

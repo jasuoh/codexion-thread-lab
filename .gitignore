@@ -1,6 +1,9 @@
-# Local reference documents
+# Local reference documents. The 42 subject must never be committed:
+# keep your copy anywhere in the checkout, it stays ignored.
 /README.private.md
-/en.subject.pdf
+*subject*.pdf
+*Subject*.pdf
+*SUBJECT*.pdf
 
 # Python caches
 __pycache__/

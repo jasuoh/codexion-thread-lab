@@ -78,6 +78,73 @@ class CheckerTests(unittest.TestCase):
         output = self.check_log(self.completion_log(45), True, expect='survive')
         self.assertNotIn('should have stopped', output)
 
+    # Ideal-timing log of a protocol that takes the lower-numbered dongle first
+    # and holds it while waiting: coders start one after another and coder 4
+    # burns out although the parameters are feasible.
+    STAIRCASE = (
+        '0 1 has taken a dongle\n'
+        '0 2 has taken a dongle\n'
+        '0 3 has taken a dongle\n'
+        '0 3 has taken a dongle\n'
+        '0 3 is compiling\n'
+        '200 3 is debugging\n'
+        '250 2 has taken a dongle\n'
+        '250 2 is compiling\n'
+        '400 3 is refactoring\n'
+        '450 2 is debugging\n'
+        '500 1 has taken a dongle\n'
+        '500 1 is compiling\n'
+        '600 3 has taken a dongle\n'
+        '600 3 has taken a dongle\n'
+        '600 3 is compiling\n'
+        '650 2 is refactoring\n'
+        '700 1 is debugging\n'
+        '750 4 has taken a dongle\n'
+        '800 3 is debugging\n'
+        '800 4 burned out\n')
+
+    def test_unexpected_burnout_diagnosis(self):
+        output = self.check_log(self.STAIRCASE, False, n=4, ttb=800, ttc=200, ttd=200, ttr=200,
+                                req=5, cd=50, expect='survive')
+        self.assertIn('200 ms of margin', output)
+        self.assertIn('hold and wait: coder 1 took one dongle at 0', output)
+        self.assertIn('HINT: a coder that holds one dongle', output)
+        self.assertIn('DIAG:   800 4 burned out', output)
+
+    def test_infeasible_expectation_diagnosis(self):
+        log = '0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n300 1 burned out\n'
+        output = self.check_log(log, False, ttb=300, ttc=200, ttd=100, ttr=100, expect='survive')
+        self.assertIn('a burnout is expected; the case expectation may be wrong', output)
+
+    def test_hint_once_per_kind(self):
+        log = '0 1 hello\n1 1 world\n'
+        output = self.check_log(log, False)
+        self.assertEqual(output.count('HINT: the format is exactly'), 1)
+
+    def test_aborted_run_skips_completeness(self):
+        output = self.check_log('0 1 has taken a dongle\n', True, expect='survive', aborted=1)
+        self.assertNotIn('started only', output)
+
+    def test_shared_dongle_not_reported_as_cooldown(self):
+        log = ''.join(f'{t} {x} {action}\n' for t, x in [(0, 1), (5, 2)]
+                      for action in ['has taken a dongle', 'has taken a dongle', 'is compiling'])
+        output = self.check_log(log, False, cd=50)
+        self.assertIn('shares a dongle', output)
+        self.assertNotIn('cooldown', output)
+
+    def test_deadline_from_compile_end(self):
+        log = ('0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n200 1 is debugging\n'
+               '300 1 is refactoring\n400 1 has taken a dongle\n400 1 has taken a dongle\n401 1 is compiling\n')
+        output = self.check_log(log, False, n=2, ttb=310, ttc=200, ttd=100, ttr=100, expect='any')
+        self.assertIn('counted from the END of a compile', output)
+
+    def test_only_earlier_deadline_is_missed_burnout(self):
+        log = ('0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n'
+               '0 2 has taken a dongle\n0 2 has taken a dongle\n0 2 is compiling\n415 1 burned out\n')
+        output = self.check_log(log, False, ttb=400, ttc=20, expect='burnout')
+        self.assertIn('after the deadline', output)
+        self.assertNotIn('should have been reported', output)
+
     def test_format_and_ids(self):
         for log in ['hello\n', '0 3 has taken a dongle\n', '']:
             with self.subTest(log=log):
@@ -156,6 +223,33 @@ class RunnerTests(unittest.TestCase):
     def test_crash(self):
         result = self.run_case('kill -TERM $$', 'invalid | | crashes')
         self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_failure_explained(self):
+        def inspect(logs):
+            summary = (logs / 'latest' / 'summary.txt').read_text()
+            self.assertNotIn('\033', summary)
+            self.assertIn('Failed cases:', summary)
+            self.assertIn('hint:', summary)
+        result = self.run_case('echo "0 1 has taken a dongle"; kill -SEGV $$',
+                               'survive | 2 1000 10 10 10 1 0 edf | crashes', inspect=inspect)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('SIGSEGV', result.stdout)
+        self.assertIn('-fsanitize=address', result.stdout)
+        self.assertIn('last output: 0 1 has taken a dongle', result.stdout)
+        self.assertIn('reproduce: ', result.stdout)
+        self.assertNotIn('started only', result.stdout)
+
+    def test_hang_hint(self):
+        result = self.run_case('exec sleep 5', 'survive | 2 1000 10 10 10 1 0 edf | hangs')
+        self.assertIn('broadcast every condition variable', result.stdout)
+        self.assertNotIn('still advancing', result.stdout)
+
+    def test_running_past_limit_is_not_a_deadlock(self):
+        body = ('t=0; while :; do echo "$t 1 has taken a dongle"; echo "$t 1 has taken a dongle"; '
+                'echo "$t 1 is compiling"; t=$((t + 100)); sleep 0.1; done')
+        result = self.run_case(body, 'survive | 2 100000 10 10 10 1 0 edf | runs too long')
+        self.assertIn('still advancing', result.stdout)
+        self.assertNotIn('threads are blocked', result.stdout)
 
     def test_invalid_simulation_on_stderr(self):
         result = self.run_case('echo "0 1 has taken a dongle" >&2; exit 1', 'invalid | | invalid')
@@ -279,12 +373,27 @@ class FunctionCheckTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_forbidden_source(self):
-        for call in ['pthread_detach(t)', 'pthread_cond_signal(&c)', 'clock_gettime(0, &ts)',
-                     'pthread_mutex_trylock(&m)', 'nanosleep(&ts, 0)']:
+        for call in ['pthread_detach(t)', 'pthread_mutex_trylock(&m)', 'nanosleep(&ts, 0)',
+                     'pthread_barrier_wait(&b)', 'strtol(s, 0, 10)', 'calloc(1, 1)']:
             with self.subTest(call=call):
                 result = self.scan(f'int\tmain(void)\n{{\n\t{call};\n\treturn (0);\n}}\n')
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(call.split('(')[0], result.stdout)
+
+    def test_v15_additions_allowed(self):
+        # Subject v1.5 adds pthread_cond_signal and clock_gettime to the list.
+        result = self.scan('int\tmain(void)\n{\n\tpthread_cond_signal(&c);\n'
+                           '\tclock_gettime(CLOCK_REALTIME, &ts);\n\treturn (0);\n}\n')
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_tests_folder_skipped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'tests').mkdir()
+            (Path(folder) / 'tests' / 't.c').write_text('int\tmain(void)\n{\n\tsleep(1);\n}\n')
+            (Path(folder) / 'main.c').write_text('int\tmain(void)\n{\n\treturn (0);\n}\n')
+            result = subprocess.run(['python3', str(HERE / 'check_functions.py'), folder],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_global_variable(self):
         result = self.scan('int\tg_count = 0;\n\nint\tmain(void)\n{\n\treturn (g_count);\n}\n')
@@ -296,14 +405,16 @@ class FunctionCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source, binary = Path(folder) / 'a.c', Path(folder) / 'a.out'
             source.write_text('#include <stdlib.h>\n#include <time.h>\nint main(void)\n{\n'
-                              '\tstruct timespec ts;\n\tvoid *p = malloc(1);\n\tfree(p);\n'
-                              '\treturn clock_gettime(CLOCK_MONOTONIC, &ts);\n}\n')
+                              '\tstruct timespec ts = {0, 1000};\n\tvoid *p = malloc(1);\n\tfree(p);\n'
+                              '\tclock_gettime(CLOCK_REALTIME, &ts);\n'
+                              '\treturn nanosleep(&ts, 0);\n}\n')
             subprocess.run(['cc', str(source), '-o', str(binary)], check=True)
             result = subprocess.run(['python3', str(HERE / 'check_functions.py'), str(binary)],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stdout)
-            self.assertIn('clock_gettime', result.stdout)
+            self.assertIn('nanosleep', result.stdout)
             self.assertNotIn('malloc', result.stdout)
+            self.assertNotIn('clock_gettime', result.stdout)
 
 
 class BuildCheckTests(unittest.TestCase):
@@ -323,6 +434,22 @@ class BuildCheckTests(unittest.TestCase):
         result = self.check(self.GOOD)
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    @unittest.skipUnless(shutil.which('cc') and shutil.which('make') and shutil.which('git'),
+                         'needs cc, make and git')
+    def test_makefile_location(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sub = Path(folder) / 'coders'
+            sub.mkdir()
+            subprocess.run(['git', 'init', '-q', folder], check=True)
+            for where in (Path(folder), sub):
+                (where / 'Makefile').write_text(self.GOOD)
+                (where / 'main.c').write_text('int\tmain(void)\n{\n\treturn (0);\n}\n')
+            root = subprocess.run([str(HERE / 'check_build.sh'), folder], capture_output=True, text=True)
+            self.assertIn('OK: Makefile is at the repository root', root.stdout)
+            (Path(folder) / 'Makefile').unlink()
+            nested = subprocess.run([str(HERE / 'check_build.sh'), str(sub)], capture_output=True, text=True)
+            self.assertIn('not at the repository root', nested.stdout)
+
     @unittest.skipUnless(shutil.which('cc') and shutil.which('make'), 'needs cc and make')
     def test_relink_and_missing_flags(self):
         result = self.check('all:\n\tcc -Wall main.c -o codexion\nclean:\nfclean:\n\trm -f codexion\n'
@@ -330,6 +457,61 @@ class BuildCheckTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         for message in ('-Wextra', '-Werror', 'relinks'):
             self.assertIn(message, result.stdout)
+
+
+class ReadmeCheckTests(unittest.TestCase):
+    GOOD = (
+        '*This project has been created as part of the 42 curriculum by login1, login2.*\n\n'
+        '# Codexion\n\n## Description\nCoders share dongles.\n\n'
+        '## Instructions\n```\nmake\n# not a heading\n```\n\n'
+        '## Resources\n- man pages\n\n### AI usage\nAI explained condition variables.\n\n'
+        '## Blocking cases handled\n### Deadlock\nCoffman conditions: circular wait is broken by '
+        'taking both dongles atomically, so deadlock cannot happen. Starvation is avoided by the '
+        'EDF heap. Cooldown is a timed wait. Burnout is detected by the monitor every millisecond. '
+        'Log lines are serialized with a print mutex so they never interleave.\n\n'
+        '## Thread synchronization mechanisms\nEach dongle has a pthread_mutex_t and a pthread_cond_t. '
+        'A race on the stop flag is prevented by reading it under its mutex; the monitor sets it '
+        'and broadcasts every condition variable so waiting coders wake up and exit.\n')
+
+    def check(self, text):
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / 'README.md').write_text(text)
+            return subprocess.run(['python3', str(HERE / 'check_readme.py'), folder],
+                                  capture_output=True, text=True)
+
+    def test_complete_readme(self):
+        result = self.check(self.GOOD)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('WARN', result.stdout)
+
+    def test_first_line(self):
+        for first in ('This project has been created as part of the 42 curriculum by login1.',
+                      '**This project has been created as part of the 42 curriculum by login1.**',
+                      '*This project was made by login1.*'):
+            with self.subTest(first=first):
+                result = self.check(first + self.GOOD[self.GOOD.index('\n'):])
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn('first line', result.stdout)
+        result = self.check('_This project has been created as part of the 42 curriculum by a-b_\n'
+                            + self.GOOD[self.GOOD.index('\n'):])
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_missing_v15_sections(self):
+        text = self.GOOD[:self.GOOD.index('## Blocking')]
+        result = self.check(text)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('Blocking cases handled', result.stdout)
+        self.assertIn('Thread synchronization mechanisms', result.stdout)
+
+    def test_missing_ai_description(self):
+        result = self.check(self.GOOD.replace('### AI usage\nAI explained condition variables.\n', ''))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('AI', result.stdout)
+
+    def test_missing_topics_warn(self):
+        result = self.check(self.GOOD.replace('Coffman conditions: ', ''))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Coffman", result.stdout)
 
 
 class LatencyTests(unittest.TestCase):
@@ -357,7 +539,7 @@ class LatencyTests(unittest.TestCase):
 class MenuTests(unittest.TestCase):
     def test_all_case_definitions(self):
         cases = menu.load_cases(HERE / 'cases.txt')
-        self.assertEqual(len(cases), 68)
+        self.assertEqual(len(cases), 76)
         self.assertTrue(any(case[0] == 'policy' for case in cases))
 
     def test_bad_case_definition(self):

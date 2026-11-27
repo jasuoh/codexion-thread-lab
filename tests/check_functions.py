@@ -4,7 +4,8 @@
 Usage:
   check_functions.py BINARY          inspect imported symbols with nm (accurate)
   check_functions.py SOURCE_DIR      scan .c/.h files (heuristic, no build needed);
-                                     only SOURCE_DIR/coders is scanned when it exists
+                                     only SOURCE_DIR/coders is scanned when it exists;
+                                     tests/ and hidden directories are skipped
 
 Exit status: 0 nothing found, 1 disallowed use found, 2 usage or tool error.
 """
@@ -14,13 +15,13 @@ import shutil
 import subprocess
 import sys
 
-# Allowed external functions, from the subject (see GUIDE.md section 3).
+# Allowed external functions, from the subject v1.5 (see GUIDE.md section 3).
 ALLOWED = {
     'pthread_create', 'pthread_join',
     'pthread_mutex_init', 'pthread_mutex_lock', 'pthread_mutex_unlock', 'pthread_mutex_destroy',
     'pthread_cond_init', 'pthread_cond_wait', 'pthread_cond_timedwait',
-    'pthread_cond_broadcast', 'pthread_cond_destroy',
-    'gettimeofday', 'usleep', 'write', 'malloc', 'free', 'printf', 'fprintf',
+    'pthread_cond_signal', 'pthread_cond_broadcast', 'pthread_cond_destroy',
+    'gettimeofday', 'clock_gettime', 'usleep', 'write', 'malloc', 'free', 'printf', 'fprintf',
     'strcmp', 'strlen', 'atoi', 'memset',
 }
 
@@ -33,6 +34,13 @@ COMPILER_SUBSTITUTES = {
     '__memcpy_chk': 'struct copy', 'strtol': 'atoi', '__isoc23_strtol': 'atoi',
 }
 
+# Symbol names that are the allowed function itself under another ABI name
+# (32-bit time64 builds, symbol versioning), accepted without a note.
+ALIASES = {
+    '__clock_gettime': 'clock_gettime', '__clock_gettime64': 'clock_gettime',
+    '__gettimeofday64': 'gettimeofday', '__pthread_cond_timedwait64': 'pthread_cond_timedwait',
+}
+
 # Runtime and toolchain symbols that appear in every executable.
 RUNTIME = re.compile(r'^(__libc_start_main|__libc_csu_\w+|__cxa_finalize|__cxa_atexit|'
                      r'__gmon_start__|_ITM_\w+|__stack_chk_fail|__stack_chk_guard|'
@@ -43,8 +51,8 @@ RUNTIME = re.compile(r'^(__libc_start_main|__libc_csu_\w+|__cxa_finalize|__cxa_a
 
 # Common mistakes worth naming explicitly in the source scan.
 KNOWN_FORBIDDEN = {
-    'pthread_detach', 'pthread_cond_signal', 'pthread_mutex_trylock', 'pthread_condattr_setclock',
-    'clock_gettime', 'nanosleep', 'sleep', 'strtol', 'strtoll', 'strtoul', 'sscanf', 'puts',
+    'pthread_detach', 'pthread_mutex_trylock', 'pthread_mutex_timedlock', 'pthread_condattr_setclock',
+    'pthread_barrier_init', 'pthread_barrier_wait', 'pthread_exit', 'pthread_cancel', 'nanosleep', 'sleep', 'strtol', 'strtoll', 'strtoul', 'sscanf', 'puts',
     'exit', 'calloc', 'realloc', 'strdup', 'strncmp', 'memcpy', 'sem_init', 'sem_open', 'sem_wait',
     'sem_post', 'fork', 'signal', 'perror', 'strerror', 'time', 'clock', 'abort', 'fflush',
 }
@@ -78,8 +86,9 @@ def check_binary(path):
         if not line.strip():
             continue
         name = line.split()[-1].split('@')[0]
-        if name.startswith('_') and name[1:] in ALLOWED | set(COMPILER_SUBSTITUTES):
+        if name.startswith('_') and name[1:] in ALLOWED | set(COMPILER_SUBSTITUTES) | set(ALIASES):
             name = name[1:]  # macOS prefixes C symbols with an underscore
+        name = ALIASES.get(name, name)
         if name in ALLOWED or RUNTIME.match(name):
             continue
         if name in COMPILER_SUBSTITUTES:
@@ -98,10 +107,14 @@ def check_binary(path):
 
 
 def check_sources(folder):
-    # The subject's submission lives in coders/; ignore test helpers elsewhere.
+    # Sources may live in any folder (subject v1.5); prefer coders/ when it exists
+    # and skip test helpers, hidden directories and build output elsewhere.
     if (folder / 'coders').is_dir():
         folder = folder / 'coders'
-    files = [p for p in folder.rglob('*') if p.suffix in ('.c', '.h') and p.is_file()]
+    skip = {'tests', 'test', 'tester', 'testers'}
+    files = [p for p in folder.rglob('*') if p.suffix in ('.c', '.h') and p.is_file()
+             and not any(part in skip or part.startswith('.')
+                         for part in p.relative_to(folder).parts[:-1])]
     if not files:
         print(f'ERROR: no .c or .h files under {folder}', file=sys.stderr)
         return 2

@@ -2,7 +2,8 @@
 # check_build.sh PROJECT_DIR - check a Codexion Makefile and sources against the subject.
 #
 # Works on a temporary copy, so the project's own build files are untouched.
-# Checks: required rules (all, clean, fclean, re), NAME = codexion,
+# Checks: Makefile at the repository root (subject v1.5),
+# required rules (all, clean, fclean, re), NAME = codexion,
 # -Wall -Wextra -Werror and -pthread, no relink when nothing changed,
 # clean/fclean results, and norminette when it is installed.
 # Prints FAIL / WARN / OK lines. Status: 0 pass, 1 failure, 2 usage error.
@@ -16,6 +17,19 @@ warn() { echo "WARN: $*"; }
 ok() { echo "OK: $*"; }
 
 [ -f "$SRC/Makefile" ] || { fail "no Makefile in $SRC"; exit 1; }
+# Subject v1.5: "Makefile at the root, *.c and *.h in the folder of your choice".
+top="$(git -C "$SRC" rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$top" ]; then
+	warn "$SRC is not in a git checkout; cannot confirm the Makefile is at the repository root"
+elif [ "$(cd "$top" && pwd -P)" != "$(cd "$SRC" && pwd -P)" ]; then
+	if [ -f "$top/Makefile" ]; then
+		warn "Makefile checked in ${SRC#"$top"/}/, but the repository root also has one; the subject grades the root Makefile"
+	else
+		warn "Makefile is in ${SRC#"$top"/}/, not at the repository root (subject v1.5: \"Makefile at the root\")"
+	fi
+else
+	ok "Makefile is at the repository root"
+fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/codexion-build-XXXXXXXX")" || exit 2
 trap 'rm -rf -- "$WORK"' EXIT
 cp -R "$SRC/." "$WORK/" || exit 2
