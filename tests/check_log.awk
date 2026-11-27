@@ -410,7 +410,7 @@ function explain_burnout(x, t,    p, ready, l, r, starts, i, shown, from, line) 
 	if (maxpar > 0)
 		diag("at most " maxpar " coder" (maxpar > 1 ? "s" : "") " compiled at the same time (up to " int(n / 2) " possible)")
 	if (p > 0 && p < ttb)
-		print "HINT: the timings are feasible, so this burnout comes from the implementation, not from the parameters. Subject v1.5 requires liveness under edf for feasible parameters. Read the timeline below; the run is saved in the .out file."
+		print "HINT: the timings are feasible, so this burnout comes from the implementation, not from the parameters. Subject v1.5 requires liveness under edf for feasible parameters; under fifo it promises nothing, but timings with this much margin should still be met. Read the timeline below; the run is saved in the .out file."
 	from = NR - 400
 	if (from < 1)
 		from = 1
