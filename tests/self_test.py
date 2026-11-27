@@ -78,6 +78,53 @@ class CheckerTests(unittest.TestCase):
         output = self.check_log(self.completion_log(45), True, expect='survive')
         self.assertNotIn('should have stopped', output)
 
+    # Ideal-timing log of a protocol that takes the lower-numbered dongle first
+    # and holds it while waiting: coders start one after another and coder 4
+    # burns out although the parameters are feasible.
+    STAIRCASE = (
+        '0 1 has taken a dongle\n'
+        '0 2 has taken a dongle\n'
+        '0 3 has taken a dongle\n'
+        '0 3 has taken a dongle\n'
+        '0 3 is compiling\n'
+        '200 3 is debugging\n'
+        '250 2 has taken a dongle\n'
+        '250 2 is compiling\n'
+        '400 3 is refactoring\n'
+        '450 2 is debugging\n'
+        '500 1 has taken a dongle\n'
+        '500 1 is compiling\n'
+        '600 3 has taken a dongle\n'
+        '600 3 has taken a dongle\n'
+        '600 3 is compiling\n'
+        '650 2 is refactoring\n'
+        '700 1 is debugging\n'
+        '750 4 has taken a dongle\n'
+        '800 3 is debugging\n'
+        '800 4 burned out\n')
+
+    def test_unexpected_burnout_diagnosis(self):
+        output = self.check_log(self.STAIRCASE, False, n=4, ttb=800, ttc=200, ttd=200, ttr=200,
+                                req=5, cd=50, expect='survive')
+        self.assertIn('200 ms of margin', output)
+        self.assertIn('hold and wait: coder 1 took one dongle at 0', output)
+        self.assertIn('HINT: a coder that holds one dongle', output)
+        self.assertIn('DIAG:   800 4 burned out', output)
+
+    def test_infeasible_expectation_diagnosis(self):
+        log = '0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n300 1 burned out\n'
+        output = self.check_log(log, False, ttb=300, ttc=200, ttd=100, ttr=100, expect='survive')
+        self.assertIn('a burnout is expected; the case expectation may be wrong', output)
+
+    def test_hint_once_per_kind(self):
+        log = '0 1 hello\n1 1 world\n'
+        output = self.check_log(log, False)
+        self.assertEqual(output.count('HINT: the format is exactly'), 1)
+
+    def test_aborted_run_skips_completeness(self):
+        output = self.check_log('0 1 has taken a dongle\n', True, expect='survive', aborted=1)
+        self.assertNotIn('started only', output)
+
     def test_format_and_ids(self):
         for log in ['hello\n', '0 3 has taken a dongle\n', '']:
             with self.subTest(log=log):
@@ -156,6 +203,25 @@ class RunnerTests(unittest.TestCase):
     def test_crash(self):
         result = self.run_case('kill -TERM $$', 'invalid | | crashes')
         self.assertEqual(result.returncode, 1, result.stdout)
+
+    def test_failure_explained(self):
+        def inspect(logs):
+            summary = (logs / 'latest' / 'summary.txt').read_text()
+            self.assertNotIn('\033', summary)
+            self.assertIn('Failed cases:', summary)
+            self.assertIn('hint:', summary)
+        result = self.run_case('echo "0 1 has taken a dongle"; kill -SEGV $$',
+                               'survive | 2 1000 10 10 10 1 0 edf | crashes', inspect=inspect)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn('SIGSEGV', result.stdout)
+        self.assertIn('-fsanitize=address', result.stdout)
+        self.assertIn('last output: 0 1 has taken a dongle', result.stdout)
+        self.assertIn('reproduce: ', result.stdout)
+        self.assertNotIn('started only', result.stdout)
+
+    def test_hang_hint(self):
+        result = self.run_case('exec sleep 5', 'survive | 2 1000 10 10 10 1 0 edf | hangs')
+        self.assertIn('broadcast every condition variable', result.stdout)
 
     def test_invalid_simulation_on_stderr(self):
         result = self.run_case('echo "0 1 has taken a dongle" >&2; exit 1', 'invalid | | invalid')

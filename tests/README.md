@@ -42,6 +42,30 @@ Baseline cases start selected; cases marked `[stress]` start deselected. Search 
 
 Execution prints one result per case, reasons for failures, warnings, and a summary. Ctrl-C interrupts execution.
 
+## Reading a failure
+
+Every failed case prints, under its `FAIL` lines:
+
+| Line | Meaning |
+|---|---|
+| `hint:` | The usual causes of this kind of failure and where to look in your code (once per kind) |
+| `diag:` | A diagnosis computed from this run's log or status |
+| `reproduce:` | The exact command, to run the case again by hand |
+| `logs:` | The saved files of this case; the `.case` file holds all hints and diagnosis lines |
+
+After the summary, `Failed cases` lists every failure again with its reproduce command.
+
+For an **unexpected burnout**, the diagnosis says:
+
+- **Feasibility:** the best possible time between two compile starts of one coder, from its own phases and from dongle sharing (at most `n/2` coders compile at once, each occupying its dongles for `time_to_compile + dongle_cooldown`). If that is shorter than `time_to_burnout`, the burnout comes from the implementation; otherwise the case expectation is probably wrong.
+- **What the coder was doing:** waiting for its first or second dongle (since when), still refactoring, or compiling.
+- **Its neighbours:** how often they compiled while it waited. Several compiles mean it was not served first, or it never got to request that dongle.
+- **Hold and wait:** a coder that took one dongle and got the second much later. This sitting on one dongle blocks the next neighbour too, and coders end up compiling one after another (a staircase). It is the most common cause of a burnout with feasible timings, for example in `4 800 200 200 200 5 50 edf`.
+- **Parallelism:** the largest number of coders that compiled at the same time.
+- **Timeline:** the last log lines of the coder and its two neighbours.
+
+Crashes show the signal name (for example `SIGSEGV`), the last stderr and stdout lines, and how to find the crashing line. Hangs suggest the usual stop and wake-up mistakes and how to print every thread's stack with `gdb`. Valgrind failures show the first relevant lines of the report.
+
 ## Logs
 
 Each batch gets its own directory, named after its start time: `tests/logs/run-20261104-191341-FDSx`. `tests/logs/latest` points to the newest one, and earlier runs are preserved. Every run directory contains:

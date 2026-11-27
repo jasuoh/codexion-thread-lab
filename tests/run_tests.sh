@@ -205,13 +205,47 @@ run_limited() {
 	"$TIMEOUT_CMD" -k 2s "$limit" "$@" </dev/null
 }
 
+signal_name() {
+	case "$1" in
+		4) echo SIGILL ;; 6) echo "SIGABRT (abort: often a double free or a failed assertion)" ;;
+		7) echo "SIGBUS (bus error)" ;; 8) echo "SIGFPE (division by zero?)" ;;
+		9) echo "SIGKILL (killed after the timeout?)" ;; 11) echo "SIGSEGV (segmentation fault)" ;;
+		13) echo SIGPIPE ;; 15) echo SIGTERM ;; *) echo "signal $1" ;;
+	esac
+}
+
 describe_status() {
 	local rc="$1" limit="$2"
 	case "$rc" in
 		124) echo "did not terminate within ${limit}s (hang or deadlock?)" ;;
 		125|126|127) echo "could not execute the test reliably (status $rc)" ;;
-		*) if [ "$rc" -gt 128 ]; then echo "terminated by signal or signal-like status $rc"; fi ;;
+		*) if [ "$rc" -gt 128 ]; then echo "crashed: $(signal_name $((rc - 128))) (status $rc)"; fi ;;
 	esac
+}
+
+# HINT lines for a failed execution: what the status usually means, and the
+# last output before it ended.
+status_hints() {
+	local rc="$1" out="$2" err="$3"
+	if [ "$rc" -eq 124 ]; then
+		echo "HINT: a hang at the end usually means a thread never wakes up to see the stop flag: broadcast every condition variable after setting stop, check stop in every wait loop and sleep loop, and join only threads that were created. A hang at the start can be a deadlock: two locks taken in different orders."
+		echo "HINT: to see where each thread is stuck: run it, then in another terminal: gdb -p \$(pgrep codexion) -batch -ex 'thread apply all bt'"
+	elif [ "$rc" -gt 128 ]; then
+		echo "HINT: rebuild with -g -fsanitize=address (or run it under valgrind) to get the line of the crash. Common causes: argv read before argc is checked, a coder index outside the dongle array (coder n's right dongle is dongle 1), freeing memory while threads still run, or destroying a mutex before join."
+	fi
+	if [ -s "$err" ]; then
+		tail -n 3 "$err" | sed 's/^/DIAG: stderr: /'
+	fi
+	if [ -s "$out" ]; then
+		tail -n 3 "$out" | sed 's/^/DIAG: last output: /'
+	fi
+}
+
+# The first lines of a Valgrind report that say what went wrong, and where.
+valgrind_summary() {
+	grep -E '(Invalid (read|write|free)|uninitialised|definitely lost|indirectly lost|possibly lost|still reachable|Conflicting|data race|lock order|Mismatched|Source and destination|at 0x|by 0x)' "$1" \
+		| sed -E 's/^==[0-9]+== *//' | grep -v -E '^(at|by) 0x[0-9A-F]+: (\?\?\?|start_thread|clone|__libc_start|_start|\(below main\))' \
+		| head -n 6 | sed 's/^/DIAG: /'
 }
 
 # Print a result line in color, and without color to summary.txt.
@@ -222,8 +256,12 @@ result_line() {
 	printf '[%s] %s\n' "$tag" "$*" | sed $'s/\033\\[[0-9;]*m//g' >&3
 }
 
+# Indented detail lines; the copy in summary.txt has no colors.
 details() {
-	sed 's/^/         /' | tee -a /dev/fd/3
+	local text
+	text="$(sed 's/^/         /')"
+	printf '%s\n' "$text"
+	printf '%s\n' "$text" | sed $'s/\033\\[[0-9;]*m//g' >&3
 }
 
 LOG_RE='^[0-9]+ [0-9]+ (has taken a dongle|is compiling|is debugging|is refactoring|burned out)$'
@@ -231,6 +269,7 @@ pass=0
 fail=0
 warned=0
 idx=0
+failed_list=()
 
 # Static check of the linked binary: functions and globals the subject forbids.
 if command -v nm >/dev/null 2>&1; then
@@ -316,6 +355,7 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	err="$base.err"
 	reasons=""
 	notes=""
+	explain=""
 	{
 		printf '%s | %s | %s\n' "$expect" "$args" "$desc"
 		printf 'started: %s  repetition: %d/%d\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$rep" "$REPEAT"
@@ -328,11 +368,16 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		"$TIMEOUT_CMD" -k 2s "$TIME_LIMIT" "$BIN" "${argv[@]}" </dev/null >"$out" 2>"$err"; } 2>"$base.time"
 	rc=$?
 	status="$(describe_status "$rc" "$TIME_LIMIT")"
-	[ -z "$status" ] || reasons="FAIL: $status"
+	if [ -n "$status" ]; then
+		reasons="FAIL: $status"
+		explain+=$'\n'"$(status_hints "$rc" "$out" "$err")"
+	fi
 
 	if [ "$expect" = invalid ]; then
 		if grep -Eq "$LOG_RE" "$out" "$err"; then
 			reasons+=$'\n'"FAIL: simulation output printed for invalid input"
+			explain+=$'\n'"HINT: validate every argument (count, digits only, range, scheduler exactly fifo or edf) before creating any thread or printing anything; atoi alone accepts \"12x\" and \"-5\"."
+			explain+=$'\n'"DIAG: first output: $(head -n 1 "$out")"
 		fi
 		[ "$rc" -ne 0 ] || notes+=$'\n'"WARN: exit status 0 for invalid input (not specified by the subject)"
 		[ -s "$err" ] || [ -s "$out" ] || notes+=$'\n'"WARN: no rejection diagnostic; rejection cannot be confirmed"
@@ -344,26 +389,29 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 			notes+=$'\n'"WARN: zero required compiles: empty successful run accepted"
 		else
 			reasons+=$'\n'"FAIL: boundary input produced neither a valid simulation nor a clear rejection"
+			explain+=$'\n'"HINT: either reject the input with a message and a nonzero exit status, or run a normal simulation; a silent exit cannot be told apart from a crash."
 		fi
 	elif [ "$expect" = policy ] && [ "${argv[5]}" -eq 0 ] && grep -Eq '^[0-9]+ [0-9]+ burned out$' "$out" "$err"; then
 		reasons+=$'\n'"FAIL: zero required compiles ended in a burnout instead of stopping immediately"
+		explain+=$'\n'"HINT: with number_of_compiles_required = 0 every coder has already compiled enough; check the completion condition before the first burnout check, or reject 0 explicitly."
 	else
 		if [ "$expect" = policy ] && [ "${argv[5]}" -eq 0 ]; then
 			notes+=$'\n'"WARN: zero required compiles still produced simulation output before stopping"
 		fi
-		[ "$rc" -eq 0 ] || notes+=$'\n'"WARN: simulation exited with status $rc (exit codes are not specified by the subject)"
+		[ "$rc" -eq 0 ] || [ -n "$status" ] || notes+=$'\n'"WARN: simulation exited with status $rc (exit codes are not specified by the subject)"
 		check_expect="$expect"
 		[ "$expect" != policy ] || check_expect=any
 		result="$(awk -v n="${argv[0]}" -v ttb="${argv[1]}" -v ttc="${argv[2]}" \
 			-v ttd="${argv[3]}" -v ttr="${argv[4]}" -v req="${argv[5]}" \
 			-v cd="${argv[6]}" -v expect="$check_expect" -v slack="$SLACK" \
-			-v ptol="$PHASE_TOL" -f "$DIR/check_log.awk" "$out" 2>"$base.check.err")"
+			-v ptol="$PHASE_TOL" -v aborted="$([ -n "$status" ] && echo 1 || echo 0)" -f "$DIR/check_log.awk" "$out" 2>"$base.check.err")"
 		check_rc=$?
 		printf '%s\n' "$result" > "$base.check"
 		if [ "$check_rc" -ne 0 ] && ! printf '%s\n' "$result" | grep -q '^FAIL'; then
 			reasons+=$'\n'"FAIL: log checker could not run (see $base.check.err)"
 		fi
 		reasons+=$'\n'"$(printf '%s\n' "$result" | grep '^FAIL' || true)"
+		explain+=$'\n'"$(printf '%s\n' "$result" | grep -E '^(HINT|DIAG)' || true)"
 		notes+=$'\n'"$(printf '%s\n' "$result" | grep '^WARN' || true)"
 		if [ "$LATENCY_WARN" -gt 0 ] && [ -z "$status" ]; then
 			python3 "$DIR/stamp.py" --analyze "$out" "$base.arrivals" "$LATENCY_WARN" > "$base.latency" 2>&1
@@ -387,6 +435,8 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		vstatus="$(describe_status "$vrc" "$vg_limit")"
 		if [ "$vrc" -eq 42 ]; then
 			reasons+=$'\n'"FAIL: Valgrind reported leaks or memory errors (see $base.vg)"
+			explain+=$'\n'"$(valgrind_summary "$base.vg")"
+			explain+=$'\n'"HINT: leaks: free on every exit path (invalid input, failed init, burnout, completion); a thread that is never joined also leaks. Errors: an invalid read/write after free usually means memory was freed before all threads were joined. Build with -g for file:line."
 		elif [ -n "$vstatus" ]; then
 			reasons+=$'\n'"FAIL: Valgrind check incomplete: $vstatus (see $base.vg)"
 		elif [ "$vrc" -ne 0 ] && [ "$expect" != invalid ] && [ "$expect" != policy ]; then
@@ -403,6 +453,8 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		rstatus="$(describe_status "$rrc" "$race_limit")"
 		if [ "$rrc" -eq 43 ]; then
 			reasons+=$'\n'"FAIL: $RACE_TOOL reported data races or lock errors (see $base.race)"
+			explain+=$'\n'"$(valgrind_summary "$base.race")"
+			explain+=$'\n'"HINT: find the two accesses in the report (one is often a read of a flag or a timestamp \"just to check\"); both must happen under the same mutex. Build with -g for file:line."
 		elif [ -n "$rstatus" ]; then
 			notes+=$'\n'"WARN: $RACE_TOOL check incomplete: $rstatus (see $base.race)"
 		fi
@@ -410,14 +462,22 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 
 	reasons="$(printf '%s\n' "$reasons" | sed '/^$/d')"
 	notes="$(printf '%s\n' "$notes" | sed '/^$/d')"
+	explain="$(printf '%s\n' "$explain" | sed '/^$/d')"
+	reproduce="$BIN $args"
 	printf 'result: %s\n' "$([ -n "$reasons" ] && echo FAIL || echo OK)" >> "$base.case"
-	printf '%s\n' "$reasons" "$notes" | sed '/^$/d' >> "$base.case"
+	printf '%s\n' "$reasons" "$explain" "$notes" | sed '/^$/d' >> "$base.case"
 	label="$(printf '%02d %-8s %s' "$idx" "$expect" "$args")"
 	if [ -n "$reasons" ]; then
 		fail=$((fail + 1))
 		result_line "$RED" FAIL "$label ${DIM}— $desc$RESET"
 		printf '%s\n' "$reasons" | head -n 5 | details
+		[ "$(printf '%s\n' "$reasons" | wc -l)" -le 5 ] || printf '... %d more FAIL lines in %s.check\n' \
+			"$(( $(printf '%s\n' "$reasons" | wc -l) - 5 ))" "$base" | details
+		[ -z "$explain" ] || printf '%s\n' "$explain" | head -n 30 \
+			| sed -e "s/^HINT:/${YELLOW}hint:${RESET}/" -e "s/^DIAG:/${DIM}diag:${RESET}/" | details
+		printf 'reproduce: %s\n' "$reproduce" | details
 		printf 'logs: %s.*\n' "$base" | details
+		failed_list+=("$label — $desc"$'\n'"           reproduce: $reproduce"$'\n'"           logs: $base.*")
 	else
 		pass=$((pass + 1))
 		result_line "$GREEN" " OK " "$label ${DIM}— $desc$RESET"
@@ -430,6 +490,13 @@ done < "$CASES"
 done
 
 [ "$total" -gt 0 ] || { echo "No cases matched: $FILTER" >&2; exit 2; }
+if [ "${#failed_list[@]}" -gt 0 ]; then
+	printf '\n%sFailed cases%s (hints and diagnosis above, and in each .case file):\n' "$RED" "$RESET"
+	printf '\nFailed cases:\n' >&3
+	for item in "${failed_list[@]}"; do
+		printf '  %s\n' "$item" | tee -a /dev/fd/3
+	done
+fi
 printf '\npassed: %s%d%s   failed: %s%d%s   with warnings: %s%d%s\n' \
 	"$GREEN" "$pass" "$RESET" "$RED" "$fail" "$RESET" "$YELLOW" "$warned" "$RESET"
 printf 'passed: %d   failed: %d   with warnings: %d\nfinished: %s\n' \
