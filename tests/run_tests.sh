@@ -226,8 +226,14 @@ describe_status() {
 # HINT lines for a failed execution: what the status usually means, and the
 # last output before it ended.
 status_hints() {
-	local rc="$1" out="$2" err="$3"
-	if [ "$rc" -eq 124 ]; then
+	local rc="$1" out="$2" err="$3" limit="$4" lastts
+	lastts="$(awk '$1 ~ /^[0-9]+$/ { t = $1 } END { print t + 0 }' "$out" 2>/dev/null)"
+	# Still advancing: the last timestamp reached 80 % of the time limit.
+	if [ "$rc" -eq 124 ] && [ -s "$out" ] && [ $(( ${lastts:-0} * 10 )) -ge $(( limit * 8000 )) ]; then
+		echo "DIAG: the log was still advancing when the ${limit}s limit hit (last timestamp ${lastts} ms): the program did not stop, it is not stuck"
+		echo "HINT: either the simulation never stops (check the completion condition: every coder reached number_of_compiles_required, and stop is set), or this case needs more time: run again with TIME_LIMIT=$((limit * 3))"
+	elif [ "$rc" -eq 124 ]; then
+		[ ! -s "$out" ] || echo "DIAG: the output stopped at ${lastts} ms, $(( limit - lastts / 1000 ))s before the time limit: threads are blocked"
 		echo "HINT: a hang at the end usually means a thread never wakes up to see the stop flag: broadcast every condition variable after setting stop, check stop in every wait loop and sleep loop, and join only threads that were created. A hang at the start can be a deadlock: two locks taken in different orders."
 		echo "HINT: to see where each thread is stuck: run it, then in another terminal: gdb -p \$(pgrep codexion) -batch -ex 'thread apply all bt'"
 	elif [ "$rc" -gt 128 ]; then
@@ -244,7 +250,7 @@ status_hints() {
 # The first lines of a Valgrind report that say what went wrong, and where.
 valgrind_summary() {
 	grep -E '(Invalid (read|write|free)|uninitialised|definitely lost|indirectly lost|possibly lost|still reachable|Conflicting|data race|lock order|Mismatched|Source and destination|at 0x|by 0x)' "$1" \
-		| sed -E 's/^==[0-9]+== *//' | grep -v -E '^(at|by) 0x[0-9A-F]+: (\?\?\?|start_thread|clone|__libc_start|_start|\(below main\))' \
+		| sed -E 's/^==[0-9]+== *//' | grep -v -E 'vgpreload|valgrind/' | grep -v -E '^(at|by) 0x[0-9A-F]+: (\?\?\?|start_thread|clone|__libc_start|_start|\(below main\))' \
 		| head -n 6 | sed 's/^/DIAG: /'
 }
 
@@ -370,7 +376,7 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	status="$(describe_status "$rc" "$TIME_LIMIT")"
 	if [ -n "$status" ]; then
 		reasons="FAIL: $status"
-		explain+=$'\n'"$(status_hints "$rc" "$out" "$err")"
+		explain+=$'\n'"$(status_hints "$rc" "$out" "$err" "$TIME_LIMIT")"
 	fi
 
 	if [ "$expect" = invalid ]; then

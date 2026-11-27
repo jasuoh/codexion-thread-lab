@@ -101,7 +101,7 @@ function hint(key) {
 	else if (key == "late_burnout")
 		print "HINT: the burnout line came more than 10 ms after the deadline. Check the monitor's sleep (about 1 ms), that it is not blocked on a lock held by a sleeping coder, and that nothing sleeps while holding the print mutex."
 	else if (key == "missed_burnout")
-		print "HINT: the monitor must check every coder on each pass; an early exit after the first finished coder, or a monitor that stopped too early, misses later burnouts."
+		print "HINT: the monitor reported a coder whose deadline came later. Check every coder on each pass and compare now - last_compile_start for each; a stale copy of last_compile_start or a monitor that skips coders reports the wrong one."
 	else if (key == "after")
 		print "HINT: nothing may be printed after a burnout. Set the stop flag before printing \"burned out\", and have every print check stop under the print mutex."
 	else if (key == "one_dongle")
@@ -153,8 +153,10 @@ function on_take(t, x) {
 # "k still compiling" only fails when k's compile time has not elapsed yet,
 # because a correct program may release before printing "is debugging".
 function check_dongle(t, x, k) {
-	if (k != x && state[k] == "compiling" && t + 1 < comp[k] + ttc)
+	if (k != x && state[k] == "compiling" && t + 1 < comp[k] + ttc) {
 		fail(ctx "coder " k " is still compiling (since " comp[k] ") and shares a dongle with coder " x, "shared")
+		return
+	}
 	if (comp[k] >= 0 && t + 1 < comp[k] + ttc + cd)
 		fail(ctx "dongle cannot finish compiling and cooldown before " (comp[k] + ttc + cd), "cooldown")
 }
@@ -168,6 +170,11 @@ function on_compile(t, x,    gap, k, par) {
 			" compiles (by about " (done_t + ttc) " ms): the simulation should have stopped")
 	}
 	gap = t - last[x]
+	if (gap > ttb + slack) {
+		late_starts++
+		if (gap > late_gap)
+			late_gap = gap
+	}
 	if (gap > ttb + slack)
 		fail(ctx "started compiling " gap " ms after its previous compile start (time_to_burnout = " ttb "): it should have burned out", "late_start")
 	check_dongle(t, x, x)
@@ -240,11 +247,16 @@ function on_burnout(t, x,    d, i) {
 	d = t - last[x]
 	if (d + 1 < ttb)
 		fail(ctx "burned out only " d " ms after its last compile start (time_to_burnout = " ttb ")", "early_burnout")
-	else if (d > ttb + 10 + slack)
+	else if (d > ttb + 10 + slack) {
 		fail(ctx "burnout printed " (d - ttb) " ms after the deadline (limit: 10 ms)", "late_burnout")
+		if (ttc > 10 + slack && d - ttb >= ttc - 10 - slack && d - ttb <= ttc + 10 + slack)
+			end_base = 1
+	}
+	# Another coder whose deadline came earlier should have been reported first.
 	for (i = 1; i <= n; i++)
-		if (i != x && t - last[i] > ttb + 10 + slack)
-			fail(ctx "coder " i " passed its deadline at " (last[i] + ttb) " but its burnout was never printed", "missed_burnout")
+		if (i != x && last[i] + slack < last[x] && t - last[i] > ttb + 10 + slack)
+			fail(ctx "coder " i "'s deadline (" (last[i] + ttb) ") came before coder " x "'s (" (last[x] + ttb) \
+				"), so coder " i " should have been reported", "missed_burnout")
 }
 
 {
@@ -312,6 +324,9 @@ function feasibility(    p) {
 			(ttc + (ttd + ttr > cd ? ttd + ttr : cd)) " ms, sharing dongles with " int(n / 2) \
 			" compiling at once needs " share_need() " ms) against time_to_burnout " ttb \
 			" ms, so a schedule without burnout exists with " (ttb - p) " ms of margin")
+	else if (expect == "burnout")
+		diag("feasibility: the best possible cycle is about " p " ms, not shorter than time_to_burnout " ttb \
+			" ms, so a burnout must happen, as this case expects")
 	else
 		diag("feasibility: the best possible cycle is about " p " ms, not shorter than time_to_burnout " ttb \
 			" ms, so a burnout is expected; the case expectation may be wrong")
@@ -367,7 +382,7 @@ function explain_burnout(x, t,    p, ready, l, r, starts, i, shown, from, line) 
 				hold_to = t
 			}
 		}
-		if (starts >= 2 && p > 0 && p < ttb)
+		if (holds == 0 && starts >= 2 && p > 0 && p < ttb)
 			print "HINT: its neighbours compiled " starts " times while it waited. Either the arbitration did not serve it first (under edf it had the earliest deadline, under fifo the oldest request), or it had not requested that dongle yet because it was stuck waiting for its other one. Check that requests are queued when they are made, ordered by the scheduler's key, and that a coder takes a dongle only at the head of its queue."
 	} else if (state[x] == "compiling")
 		diag("coder " x " was compiling: time_to_compile " ttc " ms is not shorter than time_to_burnout " ttb " ms")
@@ -375,6 +390,8 @@ function explain_burnout(x, t,    p, ready, l, r, starts, i, shown, from, line) 
 		diag("coder " x " was " state[x] ": its deadline expired before it could request dongles again " \
 			"(compile + debug + refactor = " (ttc + ttd + ttr) " ms)")
 	if (holds > 0) {
+		if (starts >= 2)
+			diag("its neighbours compiled " starts " times while it waited; it could not compete for their dongles while stuck behind the hold and wait below")
 		diag("hold and wait: coder " hold_x " took one dongle at " hold_from " and got the second only at " \
 			hold_to " (" hold_max " ms later)" (holds > 1 ? "; " holds " such waits in this run" : "") \
 			". Meanwhile that dongle was useless to its other neighbour.")
@@ -416,6 +433,8 @@ END {
 	if (aborted && !burned) {
 		# The run crashed or was stopped: the log just ends, and its
 		# completeness was already reported by the runner.
+		if (done_t >= 0)
+			diag("every coder had completed " req " compiles by about " (done_t + ttc) " ms, but the program kept running until it was stopped at " prev " ms: the completion check never ended the simulation")
 	} else if (expect == "survive" || (expect == "any" && !burned)) {
 		if (burned) {
 			fail(ctx "unexpected burnout of coder " burn_x " at " burn_t " ms")
@@ -433,7 +452,14 @@ END {
 					fail(ctx "coder " i " passed its deadline at " (last[i] + ttb) " without a burnout", "missed_burnout")
 			}
 		}
-	} else if (expect == "burnout" && !burned && NR > 0) {
+	}
+	if (late_starts && (late_gap <= ttb + ttc + 10 + slack) && ttc > 10 + slack)
+		end_base = 1
+	if (end_base) {
+		diag("the delays match time_to_compile (" ttc " ms): the deadline looks counted from the END of a compile")
+		print "HINT: burnout counts from the START of the last compile: set last_compile_start when \"is compiling\" is logged, not after the compile sleep, and do not update it again when the compile ends."
+	}
+	if (expect == "burnout" && !burned && NR > 0) {
 		fail(ctx "expected a burnout, but none was printed", "no_burnout")
 		feasibility()
 	}

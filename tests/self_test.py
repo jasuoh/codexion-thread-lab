@@ -125,6 +125,26 @@ class CheckerTests(unittest.TestCase):
         output = self.check_log('0 1 has taken a dongle\n', True, expect='survive', aborted=1)
         self.assertNotIn('started only', output)
 
+    def test_shared_dongle_not_reported_as_cooldown(self):
+        log = ''.join(f'{t} {x} {action}\n' for t, x in [(0, 1), (5, 2)]
+                      for action in ['has taken a dongle', 'has taken a dongle', 'is compiling'])
+        output = self.check_log(log, False, cd=50)
+        self.assertIn('shares a dongle', output)
+        self.assertNotIn('cooldown', output)
+
+    def test_deadline_from_compile_end(self):
+        log = ('0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n200 1 is debugging\n'
+               '300 1 is refactoring\n400 1 has taken a dongle\n400 1 has taken a dongle\n401 1 is compiling\n')
+        output = self.check_log(log, False, n=2, ttb=310, ttc=200, ttd=100, ttr=100, expect='any')
+        self.assertIn('counted from the END of a compile', output)
+
+    def test_only_earlier_deadline_is_missed_burnout(self):
+        log = ('0 1 has taken a dongle\n0 1 has taken a dongle\n0 1 is compiling\n'
+               '0 2 has taken a dongle\n0 2 has taken a dongle\n0 2 is compiling\n415 1 burned out\n')
+        output = self.check_log(log, False, ttb=400, ttc=20, expect='burnout')
+        self.assertIn('after the deadline', output)
+        self.assertNotIn('should have been reported', output)
+
     def test_format_and_ids(self):
         for log in ['hello\n', '0 3 has taken a dongle\n', '']:
             with self.subTest(log=log):
@@ -222,6 +242,14 @@ class RunnerTests(unittest.TestCase):
     def test_hang_hint(self):
         result = self.run_case('exec sleep 5', 'survive | 2 1000 10 10 10 1 0 edf | hangs')
         self.assertIn('broadcast every condition variable', result.stdout)
+        self.assertNotIn('still advancing', result.stdout)
+
+    def test_running_past_limit_is_not_a_deadlock(self):
+        body = ('t=0; while :; do echo "$t 1 has taken a dongle"; echo "$t 1 has taken a dongle"; '
+                'echo "$t 1 is compiling"; t=$((t + 100)); sleep 0.1; done')
+        result = self.run_case(body, 'survive | 2 100000 10 10 10 1 0 edf | runs too long')
+        self.assertIn('still advancing', result.stdout)
+        self.assertNotIn('threads are blocked', result.stdout)
 
     def test_invalid_simulation_on_stderr(self):
         result = self.run_case('echo "0 1 has taken a dongle" >&2; exit 1', 'invalid | | invalid')
