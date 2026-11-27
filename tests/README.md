@@ -44,14 +44,17 @@ Execution prints one result per case, reasons for failures, warnings, and a summ
 
 ## Reading a failure
 
-Every failed case prints, under its `FAIL` lines:
+Every failed case prints:
 
 | Line | Meaning |
 |---|---|
+| `expected:` | What a case of this type must show (no burnout and N compiles, a burnout within 10 ms, a rejection, ...) |
+| `got:` | What this run showed (who burned out when, compile counts, exit status, crash signal, ...) |
+| `FAIL:` | Each broken rule, as "expected ..., got ...", e.g. *cooldown violated: ... usable from 300, expected this start at 300 or later, got 200* |
 | `hint:` | The usual causes of this kind of failure and where to look in your code (once per kind) |
 | `diag:` | A diagnosis computed from this run's log or status |
 | `reproduce:` | The exact command, to run the case again by hand |
-| `logs:` | The saved files of this case; the `.case` file holds all hints and diagnosis lines |
+| `log:` | The full report of this case (`NN-expect.log`) |
 
 After the summary, `Failed cases` lists every failure again with its reproduce command.
 
@@ -75,14 +78,10 @@ Each batch gets its own directory, named after its start time: `tests/logs/run-2
 | `run.info` | Start time, command line, binary path, modification time and SHA-256, git commit of the binary's and tester's checkouts (with an uncommitted-changes marker), settings, kernel, CPU count and load |
 | `summary.txt` | The printed results without colors, plus the finish time |
 | `functions.check`, `build.check`, `readme.check` | Allowed-function, Makefile/Norm and README reports |
-| `NN-expect.case` | Case definition, start time, exact command, result and its reasons |
-| `NN-expect.out` / `.err` | stdout and stderr of the simulation |
-| `NN-expect.check` / `.check.err` | Log checker output |
-| `NN-expect.arrivals` / `.latency` | Arrival time of every stdout line and the latency analysis |
-| `NN-expect.time` | Wall, user and system seconds |
-| `NN-expect.vg` / `.race` | Optional memcheck and race-detector reports |
+| `NN-expect.log` | The full report of one case: definition, start time, command, result, `expected` and `got`, then sections for failures, hints and diagnosis, warnings, the checker output, wall/user/system time, output latency, stderr, and the optional Valgrind memcheck and race-detector reports. Empty sections are left out. |
+| `NN-expect.out` | The raw stdout of the simulation, kept separate so it can be grepped, diffed, or checked again with `check_log.awk` |
 
-With `--repeat`, names get a repetition prefix (`r03-12-survive.out`). To trace a failure, compare `run.info` (which build, which machine load) with the case's `.case` and `.out` files; `make logs` lists every run with its result line.
+With `--repeat`, names get a repetition prefix (`r03-12-survive.out`). To trace a failure, compare `run.info` (which build, which machine load) with the case's `.log` and `.out` files; `make logs` lists every run with its result line.
 
 To delete saved runs and Python caches, run `make clean` from the repository
 root after tests finish. Use `make -n clean` to preview the command. Cleanup
@@ -120,7 +119,7 @@ The subject requires a `README.md` at the repository root. `check_readme.py` loo
 
 ## Data races
 
-`--races` runs each non-invalid simulation with at most `RACE_MAX_CODERS` coders (default 8) under Valgrind DRD; any reported conflict fails the case and is saved as `.race`. DRD only sees interleavings that actually occur under its serialized scheduling, so a clean report is evidence, not proof, and very short unprotected windows can be missed. `RACE_TOOL=helgrind` is available, but recent glibc versions make Helgrind report "dubious" condition-variable broadcasts from inside `pthread_cond_timedwait` even in correct programs. Compiling with `-g` gives source lines in the reports.
+`--races` runs each non-invalid simulation with at most `RACE_MAX_CODERS` coders (default 8) under Valgrind DRD; any reported conflict fails the case and the report is saved in the race section of the case's `.log`. DRD only sees interleavings that actually occur under its serialized scheduling, so a clean report is evidence, not proof, and very short unprotected windows can be missed. `RACE_TOOL=helgrind` is available, but recent glibc versions make Helgrind report "dubious" condition-variable broadcasts from inside `pthread_cond_timedwait` even in correct programs. Compiling with `-g` gives source lines in the reports.
 
 ## What the checker can establish
 
