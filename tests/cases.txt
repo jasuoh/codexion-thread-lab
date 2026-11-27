@@ -8,8 +8,8 @@
 #   any      burnout or completion, with all observable log rules checked
 #   policy   boundary input may be rejected with a diagnostic or simulated correctly
 #
-# The expected outcomes are reasoned from the subject's rules (see GUIDE.md,
-# section 10). They are not official. Work them out on paper yourself, and add
+# The expected outcomes are reasoned from the rules of subject v1.5 (see
+# GUIDE.md, section 10). They are not official. Work them out on paper yourself, and add
 # your own cases.
 
 # ---- invalid input --------------------------------------------------------
@@ -100,3 +100,20 @@ policy | 2 4294967296 20 10 10 2 0 edf | time_to_burnout that wraps to 0 in 32 b
 # Zero required compiles: explicit rejection or immediate success is accepted.
 # Output from a run that stops at once is a warning; a burnout is a failure.
 policy | 2 1000 20 10 10 0 0 fifo | zero required compiles, documented policy
+
+# ---- subject v1.5: EDF liveness ----------------------------------------------
+# "The program must guarantee liveness: no coder should be starved of dongles
+#  and burn out under edf scheduling, provided the parameters are feasible."
+# Each case leaves at least 200 ms between the best possible cycle and the
+# deadline. A burnout here points at starvation in the arbitration.
+survive | 3 900 200 100 100 10 0 edf | EDF liveness: odd ring of 3, only one coder can compile at a time
+survive | 5 700 200 100 100 10 0 edf | EDF liveness: odd ring of 5, two compile at a time
+survive | 4 1000 200 100 100 10 100 edf | EDF liveness with cooldown between alternating pairs
+survive | 6 900 200 100 100 15 50 edf | EDF liveness: even ring, cooldown, fifteen cycles
+survive | 9 1000 150 100 100 8 20 edf | EDF liveness: larger odd ring with cooldown
+any | 5 610 200 100 100 10 0 edf | [stress] EDF liveness close to the feasibility limit (500 ms cycle)
+
+# ---- subject v1.5: a single coder has a single dongle --------------------
+# "If there is only one coder, there should be only one dongle on the table."
+burnout | 1 300 100 100 100 1 0 fifo | single coder: at most one "has taken a dongle", then burnout
+burnout | 1 300 100 100 100 1 50 edf | single coder with cooldown, edf

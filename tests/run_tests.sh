@@ -4,7 +4,13 @@ set -u
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$DIR")"
-BIN="${CODEXION:-$ROOT/coders/codexion}"
+PROJECT="${CODEXION_SRC:-}"
+# Default binary: CODEXION, else PROJECT/codexion (subject v1.5 keeps the
+# Makefile at the repository root), else coders/codexion in this checkout.
+if [ -n "${CODEXION:-}" ]; then BIN="$CODEXION"
+elif [ -n "$PROJECT" ]; then BIN="$PROJECT/codexion"
+else BIN="$ROOT/coders/codexion"
+fi
 CASES="${CASES:-$DIR/cases.txt}"
 LOGDIR="${CODEXION_LOGDIR:-$DIR/logs}"
 SLACK="${SLACK:-2}"
@@ -15,10 +21,10 @@ LATENCY_WARN="${LATENCY_WARN:-10}"
 REPEAT="${REPEAT:-1}"
 RACE_TOOL="${RACE_TOOL:-drd}"
 RACE_MAX_CODERS="${RACE_MAX_CODERS:-8}"
-PROJECT="${CODEXION_SRC:-}"
 LEAKS=0
 RACES=0
 BUILD_CHECK=1
+README_CHECK=1
 ORIGINAL_ARGS=("$@")
 FILTER=""
 INCLUDE_STRESS=0
@@ -27,7 +33,7 @@ if [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then MODE=tui; fi
 
 usage() {
 	cat <<EOF
-Usage: $0 [--batch | --tui] [--stress] [-l] [-r] [--repeat N] [--no-build-check] [FILTER]
+Usage: $0 [--batch | --tui] [--stress] [-l] [-r] [--repeat N] [--no-build-check] [--no-readme-check] [FILTER]
 
   --tui            interactive selection (default in a terminal without arguments)
   --batch          run baseline cases without the menu
@@ -37,10 +43,12 @@ Usage: $0 [--batch | --tui] [--stress] [-l] [-r] [--repeat N] [--no-build-check]
   -r, --races      also run small simulations under a Valgrind race detector
   --repeat N       run the selected cases N times (1-100) in one log directory
   --no-build-check skip the Makefile/Norm check of the project sources
+  --no-readme-check skip the README.md requirements check
   -h, --help       show this help
 
 Environment:
-  CODEXION=path       executable (default: coders/codexion, built with make)
+  CODEXION=path       executable (default: CODEXION_SRC/codexion, else
+                      coders/codexion; built with make when CODEXION is unset)
   CASES=path          case file (default: tests/cases.txt)
   CODEXION_LOGDIR=dir log parent directory (default: tests/logs)
   TIME_LIMIT=s       positive integer timeout in seconds (default: 20)
@@ -51,8 +59,8 @@ Environment:
   REPEAT=n           same as --repeat (default: 1)
   RACE_TOOL=name     drd or helgrind for --races (default: drd)
   RACE_MAX_CODERS=n  largest coder count run under --races (default: 8)
-  CODEXION_SRC=dir   project directory for the Makefile/Norm check
-                     (default: coders/ when CODEXION is not set)
+  CODEXION_SRC=dir   project directory (with the Makefile) for the Makefile,
+                     Norm and README checks (default: coders/ when CODEXION is not set)
 
 Every batch gets its own logs directory named run-DATE-TIME-ID with run.info
 (binary, checksum, settings, machine) and summary.txt; logs/latest points to it.
@@ -65,6 +73,7 @@ while [ $# -gt 0 ]; do
 		-l|--leaks) LEAKS=1 ;;
 		-r|--races) RACES=1 ;;
 		--no-build-check) BUILD_CHECK=0 ;;
+		--no-readme-check) README_CHECK=0 ;;
 		--repeat)
 			[ $# -ge 2 ] || { echo "--repeat needs a number." >&2; exit 2; }
 			REPEAT="$2"; shift ;;
@@ -133,9 +142,14 @@ fi
 if [ $((LEAKS + RACES)) -gt 0 ] && ! command -v valgrind >/dev/null 2>&1; then
 	echo "Valgrind is required for --leaks and --races." >&2; exit 2
 fi
-if [ -z "${CODEXION:-}" ] && [ -f "$ROOT/coders/Makefile" ]; then
-	[ -n "$PROJECT" ] || PROJECT="$ROOT/coders"
-	make -s -C "$ROOT/coders" || { echo "Build failed." >&2; exit 2; }
+if [ -z "${CODEXION:-}" ]; then
+	if [ -n "$PROJECT" ]; then
+		[ -f "$PROJECT/Makefile" ] || { echo "No Makefile in CODEXION_SRC=$PROJECT" >&2; exit 2; }
+		make -s -C "$PROJECT" || { echo "Build failed." >&2; exit 2; }
+	elif [ -f "$ROOT/coders/Makefile" ]; then
+		PROJECT="$ROOT/coders"
+		make -s -C "$ROOT/coders" || { echo "Build failed." >&2; exit 2; }
+	fi
 fi
 if [ ! -f "$BIN" ] || [ ! -x "$BIN" ]; then
 	echo "Binary not found or not executable: $BIN" >&2
@@ -253,6 +267,28 @@ if [ "$BUILD_CHECK" -eq 1 ] && [ -n "$PROJECT" ]; then
 	if printf '%s\n' "$build_report" | grep -q '^WARN'; then
 		warned=$((warned + 1))
 		printf '%s\n' "$build_report" | grep '^WARN' | head -n 3 | details
+	fi
+fi
+
+# README.md requirements of the subject, searched from the project directory
+# (or the binary's directory) up to its repository root.
+readme_from="${PROJECT:-$(dirname "$BIN")}"
+if [ "$README_CHECK" -eq 1 ] && git -C "$readme_from" rev-parse >/dev/null 2>&1; then
+	readme_report="$(python3 "$DIR/check_readme.py" "$readme_from" 2>&1)"
+	readme_rc=$?
+	printf '%s\n' "$readme_report" > "$LOGDIR/readme.check"
+	if [ "$readme_rc" -eq 0 ]; then
+		result_line "$GREEN" " OK " "README.md requirements"
+	elif [ "$readme_rc" -eq 1 ]; then
+		fail=$((fail + 1))
+		result_line "$RED" FAIL "README.md requirements"
+		printf '%s\n' "$readme_report" | grep -E '^FAIL|^      ' | head -n 8 | details
+	else
+		result_line "$YELLOW" WARN "README check could not run (see $LOGDIR/readme.check)"
+	fi
+	if printf '%s\n' "$readme_report" | grep -q '^WARN'; then
+		warned=$((warned + 1))
+		printf '%s\n' "$readme_report" | grep '^WARN' | head -n 3 | details
 	fi
 fi
 

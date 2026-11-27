@@ -11,9 +11,10 @@ is not included.
 
 - [Learning guide](GUIDE.md): explanations, examples, and design considerations.
 - [PDF guide](GUIDE.pdf): a downloadable version for offline reading.
-- [Test lab](tests/README.md): an interactive terminal selector, 68 test cases,
-  a log checker, forbidden-function, Makefile and Norm checks, busy-waiting
-  and output-latency detection, optional Valgrind memory and race checks, and
+- [Test lab](tests/README.md): an interactive terminal selector, 76 test cases
+  (including EDF liveness cases for subject v1.5), a log checker,
+  allowed-function, Makefile, Norm and README checks, busy-waiting and
+  output-latency detection, optional Valgrind memory and race checks, and
   timestamped, traceable logs.
 - Self-tests for the test tools, using synthetic traces and controlled fixtures.
 
@@ -37,22 +38,27 @@ Check the test tools without a Codexion binary:
 make test
 ```
 
-To test your implementation, point the lab at your executable and, for the
-Makefile and Norm check, at its project directory:
+To test your implementation, point the lab at your project directory. Subject
+v1.5 puts the Makefile at the repository root, so the lab runs `make` there
+and tests the `codexion` it builds:
 
 ```bash
-make check  CODEXION=/path/to/coders/codexion CODEXION_SRC=/path/to/coders
-make stress CODEXION=/path/to/coders/codexion
-make leaks  CODEXION=/path/to/coders/codexion
-make races  CODEXION=/path/to/coders/codexion
-make repeat CODEXION=/path/to/coders/codexion REPEAT=20
-make tui    CODEXION=/path/to/coders/codexion
+make check  CODEXION_SRC=/path/to/project
+make stress CODEXION_SRC=/path/to/project
+make leaks  CODEXION_SRC=/path/to/project
+make races  CODEXION_SRC=/path/to/project
+make repeat CODEXION_SRC=/path/to/project REPEAT=20
+make tui    CODEXION_SRC=/path/to/project
+make readme CODEXION_SRC=/path/to/project
 ```
 
+To test a binary you built yourself, set `CODEXION=/path/to/codexion` as
+well; nothing is built then.
+
 `make` alone lists every target. The same runs are available directly, for
-example `CODEXION=/path/to/codexion tests/run_tests.sh --batch --races`.
-Without `CODEXION`, the runner looks for `coders/codexion`, runs
-`make -C coders` if a Makefile exists there, and checks that Makefile.
+example `CODEXION_SRC=/path/to/project tests/run_tests.sh --batch --races`.
+Without `CODEXION` or `CODEXION_SRC`, the runner looks for `coders/codexion`,
+runs `make -C coders` if a Makefile exists there, and checks that Makefile.
 In the menu, use arrow keys to navigate, Space to toggle cases, Enter to run,
 and `q` to quit. See the [test lab documentation](tests/README.md) for filters,
 settings, and how to interpret results.
@@ -78,8 +84,8 @@ set through `CODEXION_LOGDIR` must be managed separately.
 
 These are independent learning resources, not official 42 evaluation tools.
 Use your current assignment subject as the source of truth; the subject PDF
-is not distributed in this repository. The guide references subject v1.1 and
-was written with AI assistance, so check its explanations against your subject,
+is not distributed in this repository. The guide and tests follow subject v1.5
+and were written with AI assistance, so check its explanations against your subject,
 man pages, and your own experiments.
 
 The checker can flag log-format problems, timing violations, impossible

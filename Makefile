@@ -1,7 +1,9 @@
 # Codexion test lab. Point CODEXION at your binary and CODEXION_SRC at its
 # project directory, e.g.:
-#   make check CODEXION=../codexion/coders/codexion CODEXION_SRC=../codexion/coders
-# Without CODEXION, the runner builds and tests coders/ in this checkout.
+#   make check CODEXION_SRC=../codexion
+# Subject v1.5 keeps the Makefile at the repository root: with only CODEXION_SRC
+# set, the runner builds it there and tests CODEXION_SRC/codexion. Without
+# either, it builds and tests coders/ in this checkout.
 # Extra runner options can be passed with ARGS, e.g. make check ARGS=edf.
 
 RUNNER  := tests/run_tests.sh
@@ -14,15 +16,15 @@ export CODEXION CODEXION_SRC CODEXION_LOGDIR CASES TIME_LIMIT SLACK PHASE_TOL \
 	CPU_WARN LATENCY_WARN RACE_TOOL RACE_MAX_CODERS
 
 .DEFAULT_GOAL := help
-.PHONY: help test check stress leaks races repeat full tui functions build-check \
+.PHONY: help test check stress leaks races repeat full tui functions build-check readme \
 	logs latest clean
 
 help:
 	@echo 'Self-tests (no Codexion binary needed)'
 	@echo '  make test          check the checker, runner and menu'
 	@echo
-	@echo 'Testing an implementation (set CODEXION=path, optionally CODEXION_SRC=dir)'
-	@echo '  make check         baseline cases, function check, Makefile/Norm check'
+	@echo 'Testing an implementation (set CODEXION_SRC=project dir and/or CODEXION=binary)'
+	@echo '  make check         baseline cases, function, Makefile/Norm and README checks'
 	@echo '  make stress        baseline plus timing and many-thread experiments'
 	@echo '  make leaks         baseline plus Valgrind memcheck on small cases'
 	@echo '  make races         baseline plus Valgrind DRD race detection on small cases'
@@ -31,6 +33,7 @@ help:
 	@echo '  make tui           interactive case selector'
 	@echo '  make functions     only the allowed-function/global check (binary or CODEXION_SRC)'
 	@echo '  make build-check   only the Makefile/Norm check of CODEXION_SRC'
+	@echo '  make readme        only the README.md requirements check (CODEXION_SRC or .)'
 	@echo
 	@echo 'Logs'
 	@echo '  make logs          list saved runs with their result line'
@@ -68,6 +71,9 @@ functions:
 build-check:
 	@[ -n "$$CODEXION_SRC" ] || { echo 'Set CODEXION_SRC=path/to/project'; exit 2; }
 	tests/check_build.sh "$$CODEXION_SRC"
+
+readme:
+	$(PY) tests/check_readme.py "$${CODEXION_SRC:-.}"
 
 logs:
 	@dir="$${CODEXION_LOGDIR:-tests/logs}"; \

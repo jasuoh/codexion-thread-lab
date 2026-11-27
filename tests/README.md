@@ -12,16 +12,17 @@ tests/run_tests.sh --batch -l         # memory checks for small cases
 tests/run_tests.sh --batch -r         # data-race checks (Valgrind DRD) for small cases
 tests/run_tests.sh --batch --repeat 20 edf  # repeat the selection 20 times
 CODEXION=./my_build tests/run_tests.sh # select another executable
-CODEXION_SRC=../project/coders CODEXION=../project/coders/codexion tests/run_tests.sh --batch
-tests/check_build.sh ../project/coders # only the Makefile/Norm check
+CODEXION_SRC=../project tests/run_tests.sh --batch  # build ../project, test ../project/codexion
+tests/check_build.sh ../project        # only the Makefile/Norm check
+python3 tests/check_readme.py ../project          # only the README.md requirements
 python3 tests/self_test.py            # test the checker without Codexion
 python3 tests/check_functions.py coders/codexion  # forbidden functions in a binary
 python3 tests/check_functions.py path/to/repo     # heuristic source scan, no build
 ```
 
-The repository root has a Makefile with the same entry points: `make check`, `make stress`, `make leaks`, `make races`, `make repeat REPEAT=20`, `make full`, `make logs` and `make latest`; pass `CODEXION=…` and `CODEXION_SRC=…` on the command line.
+The repository root has a Makefile with the same entry points: `make check`, `make stress`, `make leaks`, `make races`, `make repeat REPEAT=20`, `make full`, `make readme`, `make logs` and `make latest`; pass `CODEXION=…` and `CODEXION_SRC=…` on the command line.
 
-Without arguments, redirected output uses batch mode. Unless `CODEXION` is set, the runner builds with `make -C coders` when that Makefile exists, and checks that project's Makefile. This checkout does not include a Codexion implementation: supply your binary before running simulation tests.
+Without arguments, redirected output uses batch mode. Subject v1.5 asks for the Makefile at the repository root and lets you put the sources in any folder. When only `CODEXION_SRC` is set, the runner runs `make` there and tests `CODEXION_SRC/codexion`. When neither variable is set, it builds `coders/` in this checkout if that Makefile exists. With `CODEXION` set, nothing is built. This checkout does not include a Codexion implementation: supply your project or binary before running simulation tests.
 
 ## Menu controls
 
@@ -49,7 +50,7 @@ Each batch gets its own directory, named after its start time: `tests/logs/run-2
 |---|---|
 | `run.info` | Start time, command line, binary path, modification time and SHA-256, git commit of the binary's and tester's checkouts (with an uncommitted-changes marker), settings, kernel, CPU count and load |
 | `summary.txt` | The printed results without colors, plus the finish time |
-| `functions.check`, `build.check` | Allowed-function and Makefile/Norm reports |
+| `functions.check`, `build.check`, `readme.check` | Allowed-function, Makefile/Norm and README reports |
 | `NN-expect.case` | Case definition, start time, exact command, result and its reasons |
 | `NN-expect.out` / `.err` | stdout and stderr of the simulation |
 | `NN-expect.check` / `.check.err` | Log checker output |
@@ -77,17 +78,21 @@ creating Python bytecode caches.
 | `any` | Either burnout or successful completion is accepted; log checks still apply. |
 | `policy` | A boundary input may be rejected with a diagnostic and nonzero status, or produce a valid simulation. Zero required compiles may also exit successfully without output; log lines printed before an immediate stop produce a warning, a burnout fails. Inspect the warning against the implementation's documented policy. |
 
-The 68 cases cover malformed input, negative values, single-coder shutdown, even and odd rings, both schedulers, cooldowns, zero-duration phases, repeated contention, burnout during different phases, scale, and tight boundaries. They are reasoned examples, not official evaluation cases. Generous baseline timings reduce timing sensitivity; they are still expectations to investigate, not proofs for every acquisition protocol. Tight feasible schedules are experiments because the acquisition policy and OS scheduling affect the outcome. Zero-duration phase and zero-required-count probes use `policy` because the subject does not precisely specify their validation. Ordinary baseline cases assume a zero dongle cooldown is supported. The suite does not impose an `INT_MAX` input limit: validate the range supported by your implementation without arithmetic overflow. Two `policy` probes pass values just above 32-bit `int` range; silent wraparound typically shows up as a premature burnout.
+The 76 cases cover malformed input, negative values, single-coder shutdown, even and odd rings, both schedulers, cooldowns, zero-duration phases, repeated contention, burnout during different phases, scale, tight boundaries, EDF liveness with feasible parameters (subject v1.5) and the single-dongle rule for one coder. They are reasoned examples, not official evaluation cases. Generous baseline timings reduce timing sensitivity; they are still expectations to investigate, not proofs for every acquisition protocol. Tight feasible schedules are experiments because the acquisition policy and OS scheduling affect the outcome. Zero-duration phase and zero-required-count probes use `policy` because the subject does not precisely specify their validation. Ordinary baseline cases assume a zero dongle cooldown is supported. The suite does not impose an `INT_MAX` input limit: validate the range supported by your implementation without arithmetic overflow. Two `policy` probes pass values just above 32-bit `int` range; silent wraparound typically shows up as a premature burnout.
 
 ## Allowed functions and globals
 
-Before the cases run, the runner inspects the binary with `nm` and fails when it imports a function outside the subject's allowed list (for example `pthread_detach`, `pthread_cond_signal`, `pthread_mutex_trylock`, `clock_gettime`, `nanosleep`, `calloc`, `strtol`, `fflush`) or defines a global variable. The report is saved as `functions.check` in the run directory. Some symbols are emitted by the compiler for allowed calls (`printf` can become `puts` or `__printf_chk`, `atoi` can become `strtol`); these are warnings, so check the source.
+Before the cases run, the runner inspects the binary with `nm` and fails when it imports a function outside the subject's allowed list or defines a global variable. Subject v1.5 allows `pthread_cond_signal` and `clock_gettime` in addition to the earlier list. Still forbidden are, for example, `pthread_detach`, `pthread_mutex_trylock`, `pthread_barrier_*`, `pthread_condattr_setclock`, `nanosleep`, `calloc`, `strtol` and `fflush`. The report is saved as `functions.check` in the run directory. Some symbols are emitted by the compiler for allowed calls (`printf` can become `puts` or `__printf_chk`, `atoi` can become `strtol`); these are warnings, so check the source.
 
-Given a directory, `check_functions.py` scans `.c`/`.h` sources instead, limited to `coders/` when present. That mode is a heuristic: it treats every called name that the project does not define as external, so macros or unusual formatting can produce false reports.
+Given a directory, `check_functions.py` scans `.c`/`.h` sources instead, limited to `coders/` when present and skipping `tests/` and hidden directories. That mode is a heuristic: it treats every called name that the project does not define as external, so macros or unusual formatting can produce false reports.
 
 ## Makefile and Norm
 
-When the project directory is known (`CODEXION_SRC`, or `coders/` when `CODEXION` is not set), `check_build.sh` copies it to a temporary directory and checks: the `all`, `clean`, `fclean` and `re` rules, `NAME = codexion`, `-Wall -Wextra -Werror` and `-pthread` in the compiler commands, that a second `make` neither recompiles nor relinks, that `clean` removes object files and `fclean` the executable, and that `re` rebuilds. If `norminette` is installed, it must pass on every `.c` and `.h` file. The project's own directory is never modified. Use `--no-build-check` to skip it.
+When the project directory is known (`CODEXION_SRC`, or `coders/` when `CODEXION` is not set), `check_build.sh` copies it to a temporary directory and checks: that the Makefile is at the repository root (a warning otherwise, since v1.5 says "Makefile at the root"), the `all`, `clean`, `fclean` and `re` rules, `NAME = codexion`, `-Wall -Wextra -Werror` and `-pthread` in the compiler commands, that a second `make` neither recompiles nor relinks, that `clean` removes object files and `fclean` the executable, and that `re` rebuilds. If `norminette` is installed, it must pass on every `.c` and `.h` file. The project's own directory is never modified. Use `--no-build-check` to skip it.
+
+## README
+
+The subject requires a `README.md` at the repository root. `check_readme.py` looks for it from the project directory (or the binary's directory) up to the git root, and fails when one of these is missing: the italic first line `*This project has been created as part of the 42 curriculum by <login>…*`, the `Description`, `Instructions` and `Resources` sections, a description of AI use in `Resources`, and the v1.5 sections `Blocking cases handled` and `Thread synchronization mechanisms`. It warns when those two sections do not mention the topics the subject lists: deadlock prevention, Coffman's conditions, starvation, cooldown, burnout detection and log serialization; mutexes, condition variables, race prevention and coder/monitor communication. Subsections count as part of their section. These are keyword checks: read the text yourself, and check that it is in English. The report is saved as `readme.check`; `--no-readme-check` skips it.
 
 ## Data races
 
@@ -100,6 +105,8 @@ When the project directory is known (`CODEXION_SRC`, or `coders/` when `CODEXION
 - Impossible overlap between neighbouring compiles.
 - Cooldown violations when a compile starts before the earliest possible previous release plus cooldown.
 - Premature or late burnout, late compile starts, and output after burnout. A coder **can burn out while compiling** if its deadline expires during that phase.
+- EDF liveness: the `EDF liveness` cases use parameters with at least 200 ms between the best possible cycle and the deadline, so a burnout there points at starvation in the arbitration.
+- A single coder takes at most one dongle, since there is only one on the table.
 - Compile starts long after every coder completed the required compiles (warning: the simulation should already have stopped).
 - Missing compile starts on successful termination, crashes, execution failures, and hangs. A normal nonzero simulation exit status is a warning because the subject does not specify exit codes.
 
@@ -111,13 +118,13 @@ The runner also measures the CPU time of each simulation. Runs of at least 0.5 s
 
 The simulation runs with stdout on a pseudo-terminal, as in an interactive shell, and the arrival time of every line is recorded. When the burnout line reaches the terminal more than `LATENCY_WARN` ms (default 10) after its printed timestamp, or any output arrives more than 100 ms late (full buffering, or a print mutex held while sleeping), the case gets a warning. The comparison assumes the simulation clock starts close to process start; the estimated startup delay is subtracted, at most 20 ms.
 
-Request arrival times are also absent, so FIFO/EDF arbitration cannot be verified from these logs. Use instrumented traces and design review for scheduling, and Helgrind/DRD/ThreadSanitizer for races. Memory checks are separate Valgrind executions; their timing and survival outcomes are not graded because instrumentation changes timing. Leaks, memory errors, crashes, or failure to finish the memory check fail the case. Increase `TIME_LIMIT` if instrumentation needs more time.
+Request arrival times are also absent, so FIFO/EDF arbitration and the EDF tie-breaker that v1.5 requires cannot be verified from these logs. Use instrumented traces and design review for scheduling, and Helgrind/DRD/ThreadSanitizer for races. Memory checks are separate Valgrind executions; their timing and survival outcomes are not graded because instrumentation changes timing. Leaks, memory errors, crashes, or failure to finish the memory check fail the case. Increase `TIME_LIMIT` if instrumentation needs more time.
 
 ## Timing and runner settings
 
 | Environment variable | Default | Purpose |
 |---|---|---|
-| `CODEXION` | `coders/codexion` | Executable to test |
+| `CODEXION` | `CODEXION_SRC/codexion`, else `coders/codexion` | Executable to test; nothing is built when set |
 | `CASES` | `tests/cases.txt` | Alternate case list |
 | `CODEXION_LOGDIR` | `tests/logs` | Parent directory for preserved run logs |
 | `TIME_LIMIT` | 20 seconds | Positive integer per-run timeout; memory runs allow five times this |
@@ -128,7 +135,7 @@ Request arrival times are also absent, so FIFO/EDF arbitration cannot be verifie
 | `REPEAT` | 1 | Repetitions, 1 to 100 (same as `--repeat`) |
 | `RACE_TOOL` | `drd` | Race detector for `--races`: `drd` or `helgrind` |
 | `RACE_MAX_CODERS` | 8 | Largest coder count run under the race detector; race runs allow ten times `TIME_LIMIT` |
-| `CODEXION_SRC` | `coders/` without `CODEXION` | Project directory for the Makefile/Norm check |
+| `CODEXION_SRC` | `coders/` without `CODEXION` | Project directory with the Makefile: built when `CODEXION` is unset, and used for the Makefile/Norm and README checks |
 
 The checker reads timestamps after the process exits; it cannot establish when a reader actually received buffered output. The subject's burnout reporting allowance is 10 ms; `SLACK` is an extra checker tolerance, not a subject requirement. Minimum phase and premature burnout checks allow 1 ms for timestamp rounding. Successful runs and clean detector reports provide evidence, not proof. Investigate failures with saved logs and repeat under ordinary machine load.
 
