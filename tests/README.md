@@ -44,14 +44,17 @@ Execution prints one result per case, reasons for failures, warnings, and a summ
 
 ## Reading a failure
 
-Every failed case prints, under its `FAIL` lines:
+Every failed case prints:
 
 | Line | Meaning |
 |---|---|
+| `expected:` | What a case of this type must show (no burnout and N compiles, a burnout within 10 ms, a rejection, ...) |
+| `got:` | What this run showed (who burned out when, compile counts, exit status, crash signal, ...) |
+| `FAIL:` | Each broken rule, as "expected ..., got ...", e.g. *cooldown violated: ... usable from 300, expected this start at 300 or later, got 200* |
 | `hint:` | The usual causes of this kind of failure and where to look in your code (once per kind) |
 | `diag:` | A diagnosis computed from this run's log or status |
 | `reproduce:` | The exact command, to run the case again by hand |
-| `logs:` | The saved files of this case; the `.case` file holds all hints and diagnosis lines |
+| `log:` | The full report of this case (`NN-expect.log`) |
 
 After the summary, `Failed cases` lists every failure again with its reproduce command.
 
@@ -75,14 +78,10 @@ Each batch gets its own directory, named after its start time: `tests/logs/run-2
 | `run.info` | Start time, command line, binary path, modification time and SHA-256, git commit of the binary's and tester's checkouts (with an uncommitted-changes marker), settings, kernel, CPU count and load |
 | `summary.txt` | The printed results without colors, plus the finish time |
 | `functions.check`, `build.check`, `readme.check` | Allowed-function, Makefile/Norm and README reports |
-| `NN-expect.case` | Case definition, start time, exact command, result and its reasons |
-| `NN-expect.out` / `.err` | stdout and stderr of the simulation |
-| `NN-expect.check` / `.check.err` | Log checker output |
-| `NN-expect.arrivals` / `.latency` | Arrival time of every stdout line and the latency analysis |
-| `NN-expect.time` | Wall, user and system seconds |
-| `NN-expect.vg` / `.race` | Optional memcheck and race-detector reports |
+| `NN-expect.log` | The full report of one case: definition, start time, command, result, `expected` and `got`, then sections for failures, hints and diagnosis, warnings, the checker output, wall/user/system time, output latency, stderr, and the optional Valgrind memcheck and race-detector reports. Empty sections are left out. |
+| `NN-expect.out` | The raw stdout of the simulation, kept separate so it can be grepped, diffed, or checked again with `check_log.awk` |
 
-With `--repeat`, names get a repetition prefix (`r03-12-survive.out`). To trace a failure, compare `run.info` (which build, which machine load) with the case's `.case` and `.out` files; `make logs` lists every run with its result line.
+With `--repeat`, names get a repetition prefix (`r03-12-survive.out`). To trace a failure, compare `run.info` (which build, which machine load) with the case's `.log` and `.out` files; `make logs` lists every run with its result line.
 
 To delete saved runs and Python caches, run `make clean` from the repository
 root after tests finish. Use `make -n clean` to preview the command. Cleanup
@@ -102,7 +101,7 @@ creating Python bytecode caches.
 | `any` | Either burnout or successful completion is accepted; log checks still apply. |
 | `policy` | A boundary input may be rejected with a diagnostic and nonzero status, or produce a valid simulation. Zero required compiles may also exit successfully without output; log lines printed before an immediate stop produce a warning, a burnout fails. Inspect the warning against the implementation's documented policy. |
 
-The 76 cases cover malformed input, negative values, single-coder shutdown, even and odd rings, both schedulers, cooldowns, zero-duration phases, repeated contention, burnout during different phases, scale, tight boundaries, EDF liveness with feasible parameters (subject v1.5) and the single-dongle rule for one coder. They are reasoned examples, not official evaluation cases. Generous baseline timings reduce timing sensitivity; they are still expectations to investigate, not proofs for every acquisition protocol. Tight feasible schedules are experiments because the acquisition policy and OS scheduling affect the outcome. Zero-duration phase and zero-required-count probes use `policy` because the subject does not precisely specify their validation. Ordinary baseline cases assume a zero dongle cooldown is supported. The suite does not impose an `INT_MAX` input limit: validate the range supported by your implementation without arithmetic overflow. Two `policy` probes pass values just above 32-bit `int` range; silent wraparound typically shows up as a premature burnout.
+The 96 cases cover malformed input, negative values, single-coder shutdown, even and odd rings, both schedulers, cooldowns, zero-duration phases, repeated contention, burnout during different phases, scale, tight boundaries, EDF liveness with feasible parameters (subject v1.5) the single-dongle rule for one coder, input parsing (hex, prefixes of `fifo`/`edf`, values beyond `int` and 64 bits, leading zeros) and `INT_MAX` in every numeric argument, where a silent overflow shows up as a premature burnout, a phase that ends too early or a cooldown violation. They are reasoned examples, not official evaluation cases. Generous baseline timings reduce timing sensitivity; they are still expectations to investigate, not proofs for every acquisition protocol. Tight feasible schedules are experiments because the acquisition policy and OS scheduling affect the outcome. Zero-duration phase and zero-required-count probes use `policy` because the subject does not precisely specify their validation. Ordinary baseline cases assume a zero dongle cooldown is supported. The suite does not impose an `INT_MAX` input limit: validate the range supported by your implementation without arithmetic overflow. Two `policy` probes pass values just above 32-bit `int` range; silent wraparound typically shows up as a premature burnout.
 
 ## Allowed functions and globals
 
@@ -120,7 +119,7 @@ The subject requires a `README.md` at the repository root. `check_readme.py` loo
 
 ## Data races
 
-`--races` runs each non-invalid simulation with at most `RACE_MAX_CODERS` coders (default 8) under Valgrind DRD; any reported conflict fails the case and is saved as `.race`. DRD only sees interleavings that actually occur under its serialized scheduling, so a clean report is evidence, not proof, and very short unprotected windows can be missed. `RACE_TOOL=helgrind` is available, but recent glibc versions make Helgrind report "dubious" condition-variable broadcasts from inside `pthread_cond_timedwait` even in correct programs. Compiling with `-g` gives source lines in the reports.
+`--races` runs each non-invalid simulation with at most `RACE_MAX_CODERS` coders (default 8) under Valgrind DRD; any reported conflict fails the case and the report is saved in the race section of the case's `.log`. DRD only sees interleavings that actually occur under its serialized scheduling, so a clean report is evidence, not proof, and very short unprotected windows can be missed. `RACE_TOOL=helgrind` is available, but recent glibc versions make Helgrind report "dubious" condition-variable broadcasts from inside `pthread_cond_timedwait` even in correct programs. Compiling with `-g` gives source lines in the reports.
 
 ## What the checker can establish
 

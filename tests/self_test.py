@@ -239,6 +239,20 @@ class RunnerTests(unittest.TestCase):
         self.assertIn('reproduce: ', result.stdout)
         self.assertNotIn('started only', result.stdout)
 
+    def test_one_report_per_case(self):
+        def inspect(logs):
+            run = logs / 'latest'
+            names = sorted(p.name for p in run.iterdir() if p.name.startswith('01-'))
+            self.assertEqual(names, ['01-burnout.log', '01-burnout.out'])
+            report = (run / '01-burnout.log').read_text()
+            for part in ('expected:', 'got:', '=== failures ===', '=== checker ===', '=== stderr ===',
+                         '=== time (wall user system, seconds) ===', 'expected a burnout'):
+                self.assertIn(part, report)
+        result = self.run_case('echo "0 1 has taken a dongle"; echo oops >&2',
+                               'burnout | 1 50 10 10 10 1 0 fifo | no burnout printed', inspect=inspect)
+        self.assertIn('expected: a burnout printed', result.stdout)
+        self.assertIn('got:      no burnout', result.stdout)
+
     def test_hang_hint(self):
         result = self.run_case('exec sleep 5', 'survive | 2 1000 10 10 10 1 0 edf | hangs')
         self.assertIn('broadcast every condition variable', result.stdout)
@@ -309,9 +323,9 @@ class RunnerTests(unittest.TestCase):
             info = (runs[0] / 'run.info').read_text()
             for field in ('started:', 'binary:', 'sha256:', 'settings:', 'machine:'):
                 self.assertIn(field, info)
-            names = sorted(p.name for p in runs[0].glob('*.case'))
-            self.assertEqual(names, ['r01-01-invalid.case', 'r02-01-invalid.case'])
-            self.assertIn('result: OK', (runs[0] / 'r02-01-invalid.case').read_text())
+            names = sorted(p.name for p in runs[0].glob('*.log'))
+            self.assertEqual(names, ['r01-01-invalid.log', 'r02-01-invalid.log'])
+            self.assertRegex((runs[0] / 'r02-01-invalid.log').read_text(), r'result: +OK')
             summary = (runs[0] / 'summary.txt').read_text()
             self.assertIn('repetition 2/2', summary)
             self.assertIn('passed: 2', summary)
@@ -539,7 +553,7 @@ class LatencyTests(unittest.TestCase):
 class MenuTests(unittest.TestCase):
     def test_all_case_definitions(self):
         cases = menu.load_cases(HERE / 'cases.txt')
-        self.assertEqual(len(cases), 76)
+        self.assertEqual(len(cases), 96)
         self.assertTrue(any(case[0] == 'policy' for case in cases))
 
     def test_bad_case_definition(self):

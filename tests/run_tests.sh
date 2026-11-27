@@ -247,6 +247,24 @@ status_hints() {
 	fi
 }
 
+# What a case of this type must show, in one line.
+expected_text() {
+	case "$1" in
+		invalid) echo "rejection: no simulation output, no crash, no hang (a message and a nonzero exit status are recommended)" ;;
+		survive) echo "no burnout; every coder starts at least $2 compiles, then the program stops" ;;
+		burnout) echo "a burnout printed within 10 ms of a coder's deadline, nothing after it, then the program stops" ;;
+		any) echo "completion or a correct burnout; every log rule holds" ;;
+		policy) echo "a clear rejection (message and nonzero exit status) or a correct simulation" ;;
+	esac
+}
+
+# One section of a case's .log file; empty sections are left out.
+section() {
+	local title="$1" text="$2"
+	[ -n "$text" ] || return 0
+	printf '\n=== %s ===\n%s\n' "$title" "$text"
+}
+
 # The first lines of a Valgrind report that say what went wrong, and where.
 valgrind_summary() {
 	grep -E '(Invalid (read|write|free)|uninitialised|definitely lost|indirectly lost|possibly lost|still reachable|Conflicting|data race|lock order|Mismatched|Source and destination|at 0x|by 0x)' "$1" \
@@ -362,11 +380,11 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	reasons=""
 	notes=""
 	explain=""
-	{
-		printf '%s | %s | %s\n' "$expect" "$args" "$desc"
-		printf 'started: %s  repetition: %d/%d\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$rep" "$REPEAT"
-		printf 'command: %s %s\n' "$BIN" "$args"
-	} > "$base.case"
+	got=""
+	vg_report=""
+	race_report=""
+	latency_report=""
+	started="$(date '+%Y-%m-%d %H:%M:%S')"
 	# stamp.py gives the binary a terminal, as in an interactive shell, and
 	# records when each line arrives. The time keyword reports CPU used by
 	# waited-for descendants, including the binary started by timeout.
@@ -376,6 +394,7 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	status="$(describe_status "$rc" "$TIME_LIMIT")"
 	if [ -n "$status" ]; then
 		reasons="FAIL: $status"
+		got="$status"
 		explain+=$'\n'"$(status_hints "$rc" "$out" "$err" "$TIME_LIMIT")"
 	fi
 
@@ -385,10 +404,12 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 			explain+=$'\n'"HINT: validate every argument (count, digits only, range, scheduler exactly fifo or edf) before creating any thread or printing anything; atoi alone accepts \"12x\" and \"-5\"."
 			explain+=$'\n'"DIAG: first output: $(head -n 1 "$out")"
 		fi
+		[ -n "$got" ] || got="exit status $rc, $(grep -c '' < "$out") stdout line(s)$([ -s "$err" ] && printf ', stderr: %s' "$(head -n 1 "$err" | cut -c1-80)")"
 		[ "$rc" -ne 0 ] || notes+=$'\n'"WARN: exit status 0 for invalid input (not specified by the subject)"
 		[ -s "$err" ] || [ -s "$out" ] || notes+=$'\n'"WARN: no rejection diagnostic; rejection cannot be confirmed"
 	elif [ "$expect" = policy ] && ! grep -Eq "$LOG_RE" "$out" "$err"; then
 		# Acceptance of these boundary inputs is a documented implementation choice.
+		[ -n "$got" ] || got="no simulation output, exit status $rc$([ -s "$err" ] && printf ', stderr: %s' "$(head -n 1 "$err" | cut -c1-80)")"
 		if [ "$rc" -ne 0 ] && { [ -s "$err" ] || [ -s "$out" ]; }; then
 			notes+=$'\n'"WARN: boundary input rejected; compare with the implementation's documented policy"
 		elif [ "${argv[5]}" -eq 0 ] && [ ! -s "$out" ] && [ "$rc" -eq 0 ]; then
@@ -410,18 +431,18 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		result="$(awk -v n="${argv[0]}" -v ttb="${argv[1]}" -v ttc="${argv[2]}" \
 			-v ttd="${argv[3]}" -v ttr="${argv[4]}" -v req="${argv[5]}" \
 			-v cd="${argv[6]}" -v expect="$check_expect" -v slack="$SLACK" \
-			-v ptol="$PHASE_TOL" -v aborted="$([ -n "$status" ] && echo 1 || echo 0)" -f "$DIR/check_log.awk" "$out" 2>"$base.check.err")"
+			-v ptol="$PHASE_TOL" -v aborted="$([ -n "$status" ] && echo 1 || echo 0)" -f "$DIR/check_log.awk" "$out" 2>&1)"
 		check_rc=$?
-		printf '%s\n' "$result" > "$base.check"
 		if [ "$check_rc" -ne 0 ] && ! printf '%s\n' "$result" | grep -q '^FAIL'; then
-			reasons+=$'\n'"FAIL: log checker could not run (see $base.check.err)"
+			reasons+=$'\n'"FAIL: log checker could not run (see the checker section of $base.log)"
 		fi
+		[ -n "$got" ] || got="$(printf '%s\n' "$result" | sed -n 's/^GOT: //p' | head -n 1)"
 		reasons+=$'\n'"$(printf '%s\n' "$result" | grep '^FAIL' || true)"
 		explain+=$'\n'"$(printf '%s\n' "$result" | grep -E '^(HINT|DIAG)' || true)"
 		notes+=$'\n'"$(printf '%s\n' "$result" | grep '^WARN' || true)"
 		if [ "$LATENCY_WARN" -gt 0 ] && [ -z "$status" ]; then
-			python3 "$DIR/stamp.py" --analyze "$out" "$base.arrivals" "$LATENCY_WARN" > "$base.latency" 2>&1
-			notes+=$'\n'"$(grep '^WARN' "$base.latency" || true)"
+			latency_report="$(python3 "$DIR/stamp.py" --analyze "$out" "$base.arrivals" "$LATENCY_WARN" 2>&1)"
+			notes+=$'\n'"$(printf '%s\n' "$latency_report" | grep '^WARN' || true)"
 		fi
 	fi
 
@@ -438,15 +459,17 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		run_limited "$vg_limit" valgrind -q --leak-check=full --show-leak-kinds=all \
 			--errors-for-leak-kinds=all --error-exitcode=42 "$BIN" "${argv[@]}" >/dev/null 2>"$base.vg"
 		vrc=$?
+		vg_report="$(cat "$base.vg")"
+		vg_report="${vg_report:-(no errors reported)}"
 		vstatus="$(describe_status "$vrc" "$vg_limit")"
 		if [ "$vrc" -eq 42 ]; then
-			reasons+=$'\n'"FAIL: Valgrind reported leaks or memory errors (see $base.vg)"
+			reasons+=$'\n'"FAIL: Valgrind reported leaks or memory errors (see the memcheck section of $base.log)"
 			explain+=$'\n'"$(valgrind_summary "$base.vg")"
 			explain+=$'\n'"HINT: leaks: free on every exit path (invalid input, failed init, burnout, completion); a thread that is never joined also leaks. Errors: an invalid read/write after free usually means memory was freed before all threads were joined. Build with -g for file:line."
 		elif [ -n "$vstatus" ]; then
-			reasons+=$'\n'"FAIL: Valgrind check incomplete: $vstatus (see $base.vg)"
+			reasons+=$'\n'"FAIL: Valgrind check incomplete: $vstatus (see the memcheck section of $base.log)"
 		elif [ "$vrc" -ne 0 ] && [ "$expect" != invalid ] && [ "$expect" != policy ]; then
-			notes+=$'\n'"WARN: Valgrind execution returned status $vrc; inspect $base.vg"
+			notes+=$'\n'"WARN: Valgrind execution returned status $vrc; see the memcheck section of $base.log"
 		fi
 	fi
 
@@ -456,13 +479,15 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 		run_limited "$race_limit" valgrind -q --tool="$RACE_TOOL" --error-exitcode=43 \
 			"$BIN" "${argv[@]}" >/dev/null 2>"$base.race"
 		rrc=$?
+		race_report="$(cat "$base.race")"
+		race_report="${race_report:-(no conflicts reported)}"
 		rstatus="$(describe_status "$rrc" "$race_limit")"
 		if [ "$rrc" -eq 43 ]; then
-			reasons+=$'\n'"FAIL: $RACE_TOOL reported data races or lock errors (see $base.race)"
+			reasons+=$'\n'"FAIL: $RACE_TOOL reported data races or lock errors (see the race section of $base.log)"
 			explain+=$'\n'"$(valgrind_summary "$base.race")"
 			explain+=$'\n'"HINT: find the two accesses in the report (one is often a read of a flag or a timestamp \"just to check\"); both must happen under the same mutex. Build with -g for file:line."
 		elif [ -n "$rstatus" ]; then
-			notes+=$'\n'"WARN: $RACE_TOOL check incomplete: $rstatus (see $base.race)"
+			notes+=$'\n'"WARN: $RACE_TOOL check incomplete: $rstatus (see the race section of $base.log)"
 		fi
 	fi
 
@@ -470,20 +495,43 @@ while IFS='|' read -r expect args desc || [ -n "$expect$args$desc" ]; do
 	notes="$(printf '%s\n' "$notes" | sed '/^$/d')"
 	explain="$(printf '%s\n' "$explain" | sed '/^$/d')"
 	reproduce="$BIN $args"
-	printf 'result: %s\n' "$([ -n "$reasons" ] && echo FAIL || echo OK)" >> "$base.case"
-	printf '%s\n' "$reasons" "$explain" "$notes" | sed '/^$/d' >> "$base.case"
+	expected="$(expected_text "$expect" "${argv[5]:-}")"
+	[ -n "$got" ] || got="see the checker section"
+	# One readable report per case; the raw program output stays in .out.
+	{
+		printf '%s | %s | %s\n' "$expect" "$args" "$desc"
+		printf 'started:   %s  repetition: %d/%d\n' "$started" "$rep" "$REPEAT"
+		printf 'command:   %s\n' "$reproduce"
+		printf 'result:    %s\n' "$([ -n "$reasons" ] && echo FAIL || echo OK)"
+		printf 'expected:  %s\n' "$expected"
+		printf 'got:       %s\n' "$got"
+		section "failures" "$reasons"
+		section "hints and diagnosis" "$explain"
+		section "warnings" "$notes"
+		section "checker" "${result:-}"
+		section "time (wall user system, seconds)" "$(cat "$base.time" 2>/dev/null)"
+		section "output latency" "$latency_report"
+		section "stderr" "$(head -n 200 "$err" 2>/dev/null)"
+		section "valgrind memcheck" "$vg_report"
+		section "race detector ($RACE_TOOL)" "$race_report"
+		section "stdout" "$(grep -c '' < "$out") line(s) in $(basename "$out")"
+	} > "$base.log"
+	rm -f -- "$base.time" "$base.arrivals" "$base.err" "$base.vg" "$base.race"
+	result=""
+
 	label="$(printf '%02d %-8s %s' "$idx" "$expect" "$args")"
 	if [ -n "$reasons" ]; then
 		fail=$((fail + 1))
 		result_line "$RED" FAIL "$label ${DIM}— $desc$RESET"
+		printf 'expected: %s\ngot:      %s\n' "$expected" "$got" | details
 		printf '%s\n' "$reasons" | head -n 5 | details
-		[ "$(printf '%s\n' "$reasons" | wc -l)" -le 5 ] || printf '... %d more FAIL lines in %s.check\n' \
+		[ "$(printf '%s\n' "$reasons" | wc -l)" -le 5 ] || printf '... %d more FAIL lines in %s.log\n' \
 			"$(( $(printf '%s\n' "$reasons" | wc -l) - 5 ))" "$base" | details
 		[ -z "$explain" ] || printf '%s\n' "$explain" | head -n 30 \
 			| sed -e "s/^HINT:/${YELLOW}hint:${RESET}/" -e "s/^DIAG:/${DIM}diag:${RESET}/" | details
 		printf 'reproduce: %s\n' "$reproduce" | details
-		printf 'logs: %s.*\n' "$base" | details
-		failed_list+=("$label — $desc"$'\n'"           reproduce: $reproduce"$'\n'"           logs: $base.*")
+		printf 'log: %s.log\n' "$base" | details
+		failed_list+=("$label — $desc"$'\n'"           reproduce: $reproduce"$'\n'"           log: $base.log")
 	else
 		pass=$((pass + 1))
 		result_line "$GREEN" " OK " "$label ${DIM}— $desc$RESET"
@@ -497,7 +545,7 @@ done
 
 [ "$total" -gt 0 ] || { echo "No cases matched: $FILTER" >&2; exit 2; }
 if [ "${#failed_list[@]}" -gt 0 ]; then
-	printf '\n%sFailed cases%s (hints and diagnosis above, and in each .case file):\n' "$RED" "$RESET"
+	printf '\n%sFailed cases%s (full report in each .log file):\n' "$RED" "$RESET"
 	printf '\nFailed cases:\n' >&3
 	for item in "${failed_list[@]}"; do
 		printf '  %s\n' "$item" | tee -a /dev/fd/3

@@ -117,3 +117,32 @@ any | 5 610 200 100 100 10 0 edf | [stress] EDF liveness close to the feasibilit
 # "If there is only one coder, there should be only one dongle on the table."
 burnout | 1 300 100 100 100 1 0 fifo | single coder: at most one "has taken a dongle", then burnout
 burnout | 1 300 100 100 100 1 50 edf | single coder with cooldown, edf
+
+# ---- input parsing ---------------------------------------------------------
+# Not integers, not exactly fifo/edf, or out of any int range: must be rejected.
+invalid | 2 1000 0x10 10 10 2 0 fifo | hexadecimal number
+invalid | 2 1000 1O 10 10 2 0 fifo | letter O instead of a zero
+invalid | 2 1000 10 10 10 2 5- fifo | trailing minus sign
+invalid | 2 1000 10 - 10 2 0 fifo | a lone minus sign
+invalid | 2 1000 10 10 10 2 0 fi | prefix of fifo (strncmp with the wrong length)
+invalid | 2 1000 10 10 10 2 0 ed | prefix of edf
+invalid | 2 1000 10 10 10 2 0 edf_ | scheduler with a trailing character
+invalid | 2 1000 10 10 10 2 0 Fifo | scheduler with a capital letter
+invalid | 99999999999 800 200 200 200 5 0 fifo | coder count beyond int
+invalid | 4294967298 800 200 200 200 5 0 fifo | coder count that wraps to 2 in 32 bits
+invalid | 2 1000 10 10 10 99999999999999999999 0 fifo | required count beyond 64 bits
+
+# Leading zeros are decimal: 020 is 20 ms, not 16 (octal). Accept or reject.
+policy | 002 2000 020 010 010 2 0 fifo | leading zeros, read as decimal
+
+# ---- INT_MAX and overflow -------------------------------------------------
+# Accept INT_MAX or reject it with a message. A silent overflow shows up as a
+# premature burnout, a phase that ends too early, or a cooldown violation.
+policy | 2 2147483647 20 10 10 2 0 fifo | time_to_burnout = INT_MAX: deadline arithmetic must not overflow
+policy | 3 2147483647 20 10 10 3 0 edf | time_to_burnout = INT_MAX with edf deadlines
+policy | 2 1000 2147483647 10 10 1 0 fifo | time_to_compile = INT_MAX: burnout while compiling, ms-to-us conversion must not overflow
+policy | 2 1000 20 2147483647 10 1 0 fifo | time_to_debug = INT_MAX: the run must still stop when both have compiled once
+policy | 2 1000 20 10 2147483647 1 0 edf | time_to_refactor = INT_MAX: the run must still stop while a coder sleeps
+policy | 2 1000 20 10 10 1 2147483647 edf | dongle_cooldown = INT_MAX: the second coder can never compile and burns out at 1000
+policy | 3 400 300 100 100 2147483647 0 fifo | required count = INT_MAX: still ends with the burnout at 400
+policy | 2 18446744073709551626 20 10 10 2 0 fifo | time_to_burnout that wraps to 10 in 64 bits

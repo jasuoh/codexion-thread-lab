@@ -134,7 +134,7 @@ function right(x) {
 
 function on_take(t, x) {
 	if (state[x] == "refactoring" && t + 1 < mark[x] + ttr)
-		fail(ctx "refactoring lasted only " (t - mark[x]) " ms (time_to_refactor = " ttr ")", "short")
+		fail(ctx "refactoring too short: expected at least " ttr " ms (time_to_refactor), got " (t - mark[x]) " ms", "short")
 	if (state[x] == "start" || state[x] == "refactoring") {
 		state[x] = "taking"
 		takes[x] = 1
@@ -142,9 +142,9 @@ function on_take(t, x) {
 	} else if (state[x] == "taking" && takes[x] == 1) {
 		takes[x] = 2
 		if (n == 1)
-			fail(ctx "there is only one dongle, but the coder took two", "one_dongle")
+			fail(ctx "second dongle taken: expected at most one \"has taken a dongle\" (one coder, one dongle), got two", "one_dongle")
 	} else
-		fail(ctx "took a dongle while " state[x] " (a coder takes exactly two before compiling)", "order")
+		fail(ctx "dongle taken while " state[x] ": expected exactly two takes after refactoring and before compiling", "order")
 }
 
 # Coder x starts compiling at t. Dongle sharing with coder k:
@@ -154,16 +154,19 @@ function on_take(t, x) {
 # because a correct program may release before printing "is debugging".
 function check_dongle(t, x, k) {
 	if (k != x && state[k] == "compiling" && t + 1 < comp[k] + ttc) {
-		fail(ctx "coder " k " is still compiling (since " comp[k] ") and shares a dongle with coder " x, "shared")
+		fail(ctx "coder " k " is still compiling (since " comp[k] ") and shares a dongle with coder " x \
+			": expected this start at " (comp[k] + ttc + cd) " or later, got " t, "shared")
 		return
 	}
 	if (comp[k] >= 0 && t + 1 < comp[k] + ttc + cd)
-		fail(ctx "dongle cannot finish compiling and cooldown before " (comp[k] + ttc + cd), "cooldown")
+		fail(ctx "cooldown violated: the dongle shared with coder " k " is usable from " (comp[k] + ttc + cd) \
+			" (its compile at " comp[k] " + " ttc " + cooldown " cd "), expected this start at " \
+			(comp[k] + ttc + cd) " or later, got " t, "cooldown")
 }
 
 function on_compile(t, x,    gap, k, par) {
 	if (state[x] != "taking" || takes[x] != 2)
-		fail(ctx "started compiling without two \"has taken a dongle\" lines first", "order")
+		fail(ctx "compile without dongles: expected two \"has taken a dongle\" lines first, got " takes[x], "order")
 	if (done_t >= 0 && !late_warned && t > done_t + ttc + ptol) {
 		late_warned = 1
 		warn(ctx "compile started after every coder had completed " req \
@@ -176,7 +179,8 @@ function on_compile(t, x,    gap, k, par) {
 			late_gap = gap
 	}
 	if (gap > ttb + slack)
-		fail(ctx "started compiling " gap " ms after its previous compile start (time_to_burnout = " ttb "): it should have burned out", "late_start")
+		fail(ctx "started compiling " gap " ms after its previous compile start: expected a burnout at " \
+			(last[x] + ttb) " (last start " last[x] " + " ttb "), got a compile start at " t, "late_start")
 	check_dongle(t, x, x)
 	check_dongle(t, x, left(x))
 	if (right(x) != left(x))
@@ -214,11 +218,11 @@ function on_compile(t, x,    gap, k, par) {
 
 function on_debug(t, x,    d) {
 	if (state[x] != "compiling")
-		fail(ctx "debugging without compiling first", "order")
+		fail(ctx "debugging without compiling first: expected \"is compiling\" before it, got state " state[x], "order")
 	else {
 		d = t - comp[x]
 		if (d + 1 < ttc)
-			fail(ctx "compiling lasted only " d " ms (time_to_compile = " ttc ")", "short")
+			fail(ctx "compiling too short: expected at least " ttc " ms (time_to_compile), got " d " ms", "short")
 		else if (d > ttc + ptol)
 			warn(ctx "compiling lasted " d " ms (time_to_compile = " ttc ")")
 	}
@@ -228,11 +232,11 @@ function on_debug(t, x,    d) {
 
 function on_refactor(t, x,    d) {
 	if (state[x] != "debugging")
-		fail(ctx "refactoring without debugging first", "order")
+		fail(ctx "refactoring without debugging first: expected \"is debugging\" before it, got state " state[x], "order")
 	else {
 		d = t - mark[x]
 		if (d + 1 < ttd)
-			fail(ctx "debugging lasted only " d " ms (time_to_debug = " ttd ")", "short")
+			fail(ctx "debugging too short: expected at least " ttd " ms (time_to_debug), got " d " ms", "short")
 		else if (d > ttd + ptol)
 			warn(ctx "debugging lasted " d " ms (time_to_debug = " ttd ")")
 	}
@@ -246,9 +250,10 @@ function on_burnout(t, x,    d, i) {
 	burn_t = t
 	d = t - last[x]
 	if (d + 1 < ttb)
-		fail(ctx "burned out only " d " ms after its last compile start (time_to_burnout = " ttb ")", "early_burnout")
+		fail(ctx "burnout too early: expected at " (last[x] + ttb) " or later (last start " last[x] " + " ttb "), got " t, "early_burnout")
 	else if (d > ttb + 10 + slack) {
-		fail(ctx "burnout printed " (d - ttb) " ms after the deadline (limit: 10 ms)", "late_burnout")
+		fail(ctx "burnout printed " (d - ttb) " ms after the deadline: expected by " (last[x] + ttb + 10) \
+			" (deadline " (last[x] + ttb) " + 10 ms), got " t, "late_burnout")
 		if (ttc > 10 + slack && d - ttb >= ttc - 10 - slack && d - ttb <= ttc + 10 + slack)
 			end_base = 1
 	}
@@ -262,17 +267,17 @@ function on_burnout(t, x,    d, i) {
 {
 	ctx = "line " NR " \"" $0 "\": "
 	if (burned) {
-		fail(ctx "printed after the burnout", "after")
+		fail(ctx "printed after the burnout at " burn_t ": expected no more output", "after")
 		next
 	}
 	if ($0 !~ /^[0-9]+ [0-9]+ (has taken a dongle|is compiling|is debugging|is refactoring|burned out)$/) {
-		fail(ctx "does not match the log format", "format")
+		fail(ctx "does not match the log format: expected \"<ms> <coder> has taken a dongle|is compiling|is debugging|is refactoring|burned out\"", "format")
 		next
 	}
 	t = $1 + 0
 	x = $2 + 0
 	if (x < 1 || x > n) {
-		fail(ctx "coder number outside 1.." n, "format")
+		fail(ctx "coder number: expected 1.." n ", got " x, "format")
 		next
 	}
 	if (NR <= 200000) {
@@ -280,7 +285,7 @@ function on_burnout(t, x,    d, i) {
 		who[NR] = x
 	}
 	if (t < prev)
-		fail(ctx "timestamp goes backwards (previous line: " prev ")", "backwards")
+		fail(ctx "timestamp goes backwards: expected " prev " or later, got " t, "backwards")
 	if (NR == 1 && t > 20 && $3 != "burned")
 		warn(ctx "first timestamp is far from 0 (timestamps must be relative to the simulation start)")
 	prev = t
@@ -410,7 +415,7 @@ function explain_burnout(x, t,    p, ready, l, r, starts, i, shown, from, line) 
 	if (maxpar > 0)
 		diag("at most " maxpar " coder" (maxpar > 1 ? "s" : "") " compiled at the same time (up to " int(n / 2) " possible)")
 	if (p > 0 && p < ttb)
-		print "HINT: the timings are feasible, so this burnout comes from the implementation, not from the parameters. Subject v1.5 requires liveness under edf for feasible parameters; under fifo it promises nothing, but timings with this much margin should still be met. Read the timeline below; the run is saved in the .out file."
+		print "HINT: the timings are feasible, so this burnout comes from the implementation, not from the parameters. Subject v1.5 requires liveness under edf for feasible parameters; under fifo it promises nothing, but timings with this much margin should still be met. Read the timeline below; the full output is in the case's .out file."
 	from = NR - 400
 	if (from < 1)
 		from = 1
@@ -429,7 +434,7 @@ END {
 	if (config_bad) exit 2
 	ctx = "end of log: "
 	if (NR == 0)
-		fail(ctx "no output at all", "no_output")
+		fail(ctx "no output at all: expected simulation log lines", "no_output")
 	if (aborted && !burned) {
 		# The run crashed or was stopped: the log just ends, and its
 		# completeness was already reported by the runner.
@@ -437,7 +442,7 @@ END {
 			diag("every coder had completed " req " compiles by about " (done_t + ttc) " ms, but the program kept running until it was stopped at " prev " ms: the completion check never ended the simulation")
 	} else if (expect == "survive" || (expect == "any" && !burned)) {
 		if (burned) {
-			fail(ctx "unexpected burnout of coder " burn_x " at " burn_t " ms")
+			fail(ctx "unexpected burnout of coder " burn_x " at " burn_t " ms: expected every coder to reach " req " compiles without a burnout")
 			explain_burnout(burn_x, burn_t)
 		} else {
 			for (i = 1; i <= n; i++) {
@@ -445,11 +450,11 @@ END {
 				if (state[i] == "compiling" && prev + 1 < comp[i] + ttc)
 					completed--
 				if (count[i] < req)
-					fail(ctx "coder " i " started only " count[i] " compiles, " req " required", "count")
+					fail(ctx "coder " i " started only " count[i] " compiles: expected at least " req, "count")
 				else if (completed < req)
 					warn(ctx "final compile completion for coder " i " is not visible; logs alone cannot confirm completion")
 				if (prev - last[i] > ttb + 10 + slack)
-					fail(ctx "coder " i " passed its deadline at " (last[i] + ttb) " without a burnout", "missed_burnout")
+					fail(ctx "coder " i " passed its deadline at " (last[i] + ttb) " without a burnout: expected a burnout line by " (last[i] + ttb + 10), "missed_burnout")
 			}
 		}
 	}
@@ -460,7 +465,7 @@ END {
 		print "HINT: burnout counts from the START of the last compile: set last_compile_start when \"is compiling\" is logged, not after the compile sleep, and do not update it again when the compile ends."
 	}
 	if (expect == "burnout" && !burned && NR > 0) {
-		fail(ctx "expected a burnout, but none was printed", "no_burnout")
+		fail(ctx "expected a burnout, but none was printed: got " (prev >= 0 ? "a log ending at " prev " ms" : "no log"), "no_burnout")
 		feasibility()
 	}
 	lo = -1
@@ -471,6 +476,13 @@ END {
 		if (count[i] > hi)
 			hi = count[i]
 	}
+	if (burned)
+		print "GOT: coder " burn_x " burned out at " burn_t " ms; compile starts per coder " lo "-" hi
+	else if (NR > 0)
+		print "GOT: no burnout; log ends at " prev " ms; compile starts per coder " lo "-" hi \
+			(req > 0 ? " (" req " required)" : "")
+	else
+		print "GOT: no output"
 	print "INFO: " NR " lines, compile starts per coder: min " lo ", max " hi \
 		(burned ? ", coder " burn_x " burned out at " burn_t : "")
 	exit (fails > 0)
